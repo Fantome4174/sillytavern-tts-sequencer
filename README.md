@@ -21,11 +21,11 @@
 3. 点击 **Install Extension** / **安装扩展**。
 4. 粘贴本仓库 GitHub 地址：
 
-   `https://github.com/REPLACE_WITH_OWNER/sillytavern-tts-sequencer`
+   `https://github.com/Fantome4174/sillytavern-tts-sequencer`
 
 5. 安装完成后刷新 SillyTavern 页面。
 
-> 上传到 GitHub 后，把上面的地址替换为实际仓库地址即可。
+这个地址可以直接复制到 SillyTavern 的扩展安装器中。
 
 ## 使用方式
 
