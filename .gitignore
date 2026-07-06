@@ -1,0 +1,4 @@
+browser-extension/chrome-profile/
+browser-extension/edge-profile/
+*.zip
+*.crx

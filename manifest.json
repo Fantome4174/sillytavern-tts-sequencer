@@ -1,18 +1,12 @@
 {
-  "manifest_version": 3,
-  "name": "SillyTavern TTS Sequencer",
-  "version": "1.1.1",
-  "description": "Play all detected TTS voices from the latest SillyTavern message with a draggable floating bubble.",
-  "permissions": ["debugger", "webNavigation"],
-  "background": {
-    "service_worker": "background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
-      "run_at": "document_start",
-      "all_frames": true
-    }
-  ]
+  "display_name": "Latest Message TTS Sequencer",
+  "loading_order": 99,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Codex and contributors",
+  "version": "1.2.0",
+  "homePage": "https://github.com/REPLACE_WITH_OWNER/sillytavern-tts-sequencer",
+  "auto_update": true
 }
