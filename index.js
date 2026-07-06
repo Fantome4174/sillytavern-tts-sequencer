@@ -26,6 +26,11 @@
   let floatingButton = null;
   let dragState = null;
   let lastTriggerAt = 0;
+  let mediaUnlocked = false;
+
+  const isMobileViewport = () => {
+    return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
+  };
 
   const collectElements = (selector, root = document) => {
     const elements = [];
@@ -360,8 +365,52 @@
     };
   };
 
+  const dispatchTouchEvent = (element, type, x, y) => {
+    try {
+      if (typeof TouchEvent === "undefined" || typeof Touch === "undefined") return;
+
+      const touch = new Touch({
+        identifier: Date.now(),
+        target: element,
+        clientX: x,
+        clientY: y,
+        screenX: x,
+        screenY: y,
+        pageX: x + window.scrollX,
+        pageY: y + window.scrollY
+      });
+
+      element.dispatchEvent(new TouchEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        touches: type === "touchend" ? [] : [touch],
+        targetTouches: type === "touchend" ? [] : [touch],
+        changedTouches: [touch]
+      }));
+    } catch {
+      element.dispatchEvent(new Event(type, { bubbles: true, cancelable: true }));
+    }
+  };
+
+  const unlockMediaPlayback = async () => {
+    if (mediaUnlocked) return;
+    mediaUnlocked = true;
+
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (AudioContextClass) {
+        const context = new AudioContextClass();
+        if (context.state === "suspended") await context.resume();
+        await context.close?.();
+      }
+    } catch {
+      // Mobile browsers differ here; failing to unlock should not stop playback attempts.
+    }
+  };
+
   const clickElement = async (element) => {
     const { x, y } = getElementCenter(element);
+    const pointerType = isMobileViewport() ? "touch" : "mouse";
     const eventOptions = {
       bubbles: true,
       cancelable: true,
@@ -372,13 +421,23 @@
       buttons: 1
     };
 
+    const createPointerEvent = (type, options) => {
+      if (typeof PointerEvent === "undefined") {
+        return new MouseEvent(type.replace("pointer", "mouse"), options);
+      }
+
+      return new PointerEvent(type, options);
+    };
+
     element.focus?.({ preventScroll: true });
-    element.dispatchEvent(new PointerEvent("pointerover", { ...eventOptions, pointerId: 1, pointerType: "mouse", isPrimary: true }));
+    dispatchTouchEvent(element, "touchstart", x, y);
+    element.dispatchEvent(createPointerEvent("pointerover", { ...eventOptions, pointerId: 1, pointerType, isPrimary: true }));
     element.dispatchEvent(new MouseEvent("mouseover", eventOptions));
-    element.dispatchEvent(new PointerEvent("pointerdown", { ...eventOptions, pointerId: 1, pointerType: "mouse", isPrimary: true }));
+    element.dispatchEvent(createPointerEvent("pointerdown", { ...eventOptions, pointerId: 1, pointerType, isPrimary: true }));
     element.dispatchEvent(new MouseEvent("mousedown", eventOptions));
-    element.dispatchEvent(new PointerEvent("pointerup", { ...eventOptions, buttons: 0, pointerId: 1, pointerType: "mouse", isPrimary: true }));
+    element.dispatchEvent(createPointerEvent("pointerup", { ...eventOptions, buttons: 0, pointerId: 1, pointerType, isPrimary: true }));
     element.dispatchEvent(new MouseEvent("mouseup", { ...eventOptions, buttons: 0 }));
+    dispatchTouchEvent(element, "touchend", x, y);
     element.dispatchEvent(new MouseEvent("click", { ...eventOptions, buttons: 0 }));
     element.click?.();
   };
@@ -483,17 +542,21 @@
     if (now - lastTriggerAt < 350) return;
     lastTriggerAt = now;
 
-    void playLatestMessageAudios();
+    void unlockMediaPlayback().finally(() => playLatestMessageAudios());
+  };
+
+  const getPositionKey = () => {
+    return `${POSITION_KEY}-${isMobileViewport() ? "mobile" : "desktop"}`;
   };
 
   const loadButtonPosition = () => {
     try {
-      const saved = JSON.parse(window.localStorage.getItem(POSITION_KEY) || "null");
+      const saved = JSON.parse(window.localStorage.getItem(getPositionKey()) || "null");
       if (!saved) return null;
 
       return {
-        left: Math.min(Math.max(8, Number(saved.left)), window.innerWidth - 52),
-        top: Math.min(Math.max(8, Number(saved.top)), window.innerHeight - 52)
+        left: Math.min(Math.max(8, Number(saved.left)), window.innerWidth - 56),
+        top: Math.min(Math.max(8, Number(saved.top)), window.innerHeight - 56)
       };
     } catch {
       return null;
@@ -503,14 +566,14 @@
   const saveButtonPosition = () => {
     if (!floatingButton) return;
     const rect = floatingButton.getBoundingClientRect();
-    window.localStorage.setItem(POSITION_KEY, JSON.stringify({ left: rect.left, top: rect.top }));
+    window.localStorage.setItem(getPositionKey(), JSON.stringify({ left: rect.left, top: rect.top }));
   };
 
   const setButtonPosition = (left, top) => {
     if (!floatingButton) return;
 
-    const boundedLeft = Math.min(Math.max(8, left), window.innerWidth - 52);
-    const boundedTop = Math.min(Math.max(8, top), window.innerHeight - 52);
+    const boundedLeft = Math.min(Math.max(8, left), window.innerWidth - 56);
+    const boundedTop = Math.min(Math.max(8, top), window.innerHeight - 56);
 
     floatingButton.style.left = `${boundedLeft}px`;
     floatingButton.style.top = `${boundedTop}px`;
@@ -552,6 +615,10 @@
         dragState = null;
       }, 0);
     });
+
+    floatingButton.addEventListener("pointercancel", () => {
+      dragState = null;
+    });
   };
 
   const createFloatingButton = () => {
@@ -563,9 +630,18 @@
     floatingButton.textContent = ">";
     floatingButton.title = "播放最新楼层的所有 TTS 语音";
     floatingButton.setAttribute("aria-label", floatingButton.title);
+    floatingButton.classList.toggle("is-mobile", isMobileViewport());
 
     const savedPosition = loadButtonPosition();
     if (savedPosition) setButtonPosition(savedPosition.left, savedPosition.top);
+
+    floatingButton.addEventListener("pointerdown", () => {
+      void unlockMediaPlayback();
+    }, true);
+
+    floatingButton.addEventListener("touchstart", () => {
+      void unlockMediaPlayback();
+    }, { passive: true, capture: true });
 
     floatingButton.addEventListener("click", (event) => {
       event.preventDefault();
@@ -580,6 +656,16 @@
     window.setTimeout(() => showToast("TTS 顺序播放气泡已就绪"), 500);
   };
 
+  const clampButtonToViewport = () => {
+    if (!floatingButton) return;
+
+    const rect = floatingButton.getBoundingClientRect();
+    if (rect.left < 0 || rect.top < 0 || rect.right > window.innerWidth || rect.bottom > window.innerHeight) {
+      setButtonPosition(rect.left, rect.top);
+      saveButtonPosition();
+    }
+  };
+
   const boot = () => {
     if (!getChatRoot()) {
       window.setTimeout(boot, 500);
@@ -591,8 +677,20 @@
 
   window.STTtsSequencer = {
     scanLatest: getLatestMessageSequence,
-    playLatest: playLatestMessageAudios
+    playLatest: playLatestMessageAudios,
+    resetButtonPosition: () => {
+      window.localStorage.removeItem(getPositionKey());
+      if (!floatingButton) return;
+      floatingButton.style.left = "";
+      floatingButton.style.top = "";
+      floatingButton.style.right = "";
+      floatingButton.style.bottom = "";
+    }
   };
+
+  window.addEventListener("resize", () => {
+    window.setTimeout(clampButtonToViewport, 120);
+  });
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", boot, { once: true });
