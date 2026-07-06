@@ -376,11 +376,7 @@
   };
 
   const clickElement = async (element) => {
-    if (!isInViewport(element)) {
-      element.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "instant" });
-      await wait(120);
-    }
-
+    const canUseRealClick = isInViewport(element);
     const { x, y } = getElementCenter(element);
     const eventOptions = {
       bubbles: true,
@@ -402,7 +398,7 @@
     element.dispatchEvent(new MouseEvent("click", { ...eventOptions, buttons: 0 }));
     element.click?.();
 
-    if (isTopFrame) {
+    if (isTopFrame && canUseRealClick) {
       const realClickResponse = await sendRealClick(x, y);
       if (!realClickResponse?.ok) {
         console.warn("[SillyTavern TTS Sequencer] Real click failed:", realClickResponse?.error);
