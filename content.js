@@ -1,17 +1,40 @@
 (() => {
+  const BUTTON_ID = "__st_tts_sequence_button__";
+  const TOAST_ID = "__st_tts_sequence_toast__";
+  const POSITION_KEY = "__st_tts_sequence_button_position__";
+  const isTopFrame = window.top === window;
+
   let playing = false;
   let stopRequested = false;
   let currentAudio = null;
-  let lastTriggerAt = 0;
   let currentVoiceButton = null;
   let floatingButton = null;
-  const isTopFrame = window.top === window;
-  const FALLBACK_END_BUFFER_MS = 80;
-  const DIALOGUE_PAUSE_MIN_MS = 90;
-  const DIALOGUE_PAUSE_MAX_MS = 180;
+  let lastTriggerAt = 0;
+  let dragState = null;
+
+  const collectElements = (selector, root = document) => {
+    const elements = [];
+    const visit = (node) => {
+      if (!node) return;
+
+      if (node.querySelectorAll) {
+        elements.push(...node.querySelectorAll(selector));
+      }
+
+      const descendants = node.querySelectorAll ? node.querySelectorAll("*") : [];
+      for (const element of descendants) {
+        if (element.shadowRoot) visit(element.shadowRoot);
+      }
+    };
+
+    visit(root);
+    return elements;
+  };
+
+  const getStyle = (element) => window.getComputedStyle(element);
 
   const isVisible = (element) => {
-    const style = window.getComputedStyle(element);
+    const style = getStyle(element);
     const rect = element.getBoundingClientRect();
 
     return (
@@ -34,53 +57,10 @@
     );
   };
 
-  const isVisibleInCurrentView = (element) => {
-    return isVisible(element) && isInViewport(element);
-  };
+  const isVisibleInCurrentView = (element) => isVisible(element) && isInViewport(element);
 
-  const getPlayableAudios = () => {
-    return collectElements("audio")
-      .filter((audio) => isVisibleInCurrentView(audio))
-      .filter((audio) => audio.currentSrc || audio.src || audio.querySelector("source[src]"));
-  };
-
-  const collectElements = (selector, root = document) => {
-    const elements = [];
-    const visit = (node) => {
-      if (!node) return;
-
-      if (node.querySelectorAll) {
-        elements.push(...node.querySelectorAll(selector));
-      }
-
-      const descendants = node.querySelectorAll ? node.querySelectorAll("*") : [];
-      for (const element of descendants) {
-        if (element.shadowRoot) visit(element.shadowRoot);
-      }
-    };
-
-    visit(root);
-    return elements;
-  };
-
-  const getElementCenter = (element) => {
-    const rect = element.getBoundingClientRect();
-    return {
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2
-    };
-  };
-
-  const parseDurationSeconds = (text) => {
-    const normalized = String(text || "").trim();
-    const marked = normalized.match(/(\d+(?:\.\d+)?)\s*(?:"|”|″|秒|s\b)/i);
-    const plainNumber = normalized.match(/^\D*(\d{1,3}(?:\.\d+)?)\D*$/);
-    const match = marked || plainNumber;
-
-    if (!match) return null;
-
-    const seconds = Number(match[1]);
-    return Number.isFinite(seconds) ? seconds : null;
+  const hasPlayableSource = (audio) => {
+    return Boolean(audio.currentSrc || audio.src || audio.querySelector("source[src]"));
   };
 
   const getElementText = (element) => {
@@ -91,69 +71,201 @@
       element.title,
       element.getAttribute("data-duration"),
       element.getAttribute("data-time"),
-      element.getAttribute("data-audio-duration")
+      element.getAttribute("data-audio-duration"),
+      element.getAttribute("data-i18n"),
+      element.getAttribute("data-tooltip"),
+      element.getAttribute("data-original-title"),
+      element.getAttribute("class"),
+      element.id
     ].filter(Boolean).join(" ");
   };
 
-  const isProbablyVoiceBubble = (element) => {
-    const text = getElementText(element);
-    const seconds = parseDurationSeconds(text);
+  const parseDurationSeconds = (text) => {
+    const normalized = String(text || "").trim();
+    const marked = normalized.match(/(\d+(?:\.\d+)?)\s*(?:"|秒|s\b|sec\b|secs\b|second|seconds)/i);
+    const clock = normalized.match(/\b(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b/);
+    const plainNumber = normalized.match(/^\D*(\d{1,3}(?:\.\d+)?)\D*$/);
 
-    if (seconds === null || seconds <= 0 || seconds > 600) return false;
-    if (element.querySelector("audio,video")) return false;
+    if (clock) {
+      const hours = Number(clock[1] || 0);
+      const minutes = Number(clock[2] || 0);
+      const seconds = Number(clock[3] || 0);
+      return hours * 3600 + minutes * 60 + seconds;
+    }
 
-    const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
-    const cursorLooksClickable = style.cursor === "pointer";
-    const classLooksAudio = /(audio|voice|sound|tts|swipe|mes|play)/i.test(`${element.className || ""} ${element.id || ""}`);
-    const targetLooksClickable = Boolean(element.closest("button,a,[role='button'],[onclick],[tabindex]"));
-    const textLooksShort = text.replace(/\s+/g, "").length <= 16;
-    const looksCompact = rect.width >= 12 && rect.width <= 460 && rect.height >= 8 && rect.height <= 110;
+    const match = marked || plainNumber;
+    if (!match) return null;
 
-    return looksCompact && (cursorLooksClickable || classLooksAudio || targetLooksClickable || textLooksShort);
+    const seconds = Number(match[1]);
+    return Number.isFinite(seconds) ? seconds : null;
+  };
+
+  const getSillyTavernChatRoot = () => {
+    return (
+      document.querySelector("#chat") ||
+      document.querySelector("#chat_container") ||
+      document.querySelector(".chat")
+    );
+  };
+
+  const isSillyTavernPage = () => {
+    const chatRoot = getSillyTavernChatRoot();
+    if (!chatRoot) return false;
+
+    return Boolean(
+      chatRoot.querySelector(".mes, [mesid], [data-mes-id]") ||
+      document.querySelector("#send_textarea, #send_but, #character_popup, #rm_button_characters")
+    );
+  };
+
+  const getMessageElements = () => {
+    const chatRoot = getSillyTavernChatRoot() || document;
+    const messages = collectElements(".mes, [mesid], [data-mes-id]", chatRoot)
+      .filter((element) => element instanceof HTMLElement)
+      .map((element) => element.closest(".mes") || element)
+      .filter((element) => element.id !== BUTTON_ID)
+      .filter((element) => !element.closest(`#${BUTTON_ID}`));
+
+    const unique = [];
+    const seen = new Set();
+
+    for (const message of messages) {
+      if (seen.has(message)) continue;
+      seen.add(message);
+      unique.push(message);
+    }
+
+    return unique;
+  };
+
+  const getLatestMessage = () => {
+    const messages = getMessageElements();
+    if (messages.length === 0) return null;
+
+    const visibleMessages = messages.filter((message) => isVisible(message) || isInViewport(message));
+    const candidates = visibleMessages.length > 0 ? visibleMessages : messages;
+
+    return candidates.sort((left, right) => {
+      const leftId = Number(left.getAttribute("mesid") || left.dataset.mesId);
+      const rightId = Number(right.getAttribute("mesid") || right.dataset.mesId);
+
+      if (Number.isFinite(leftId) && Number.isFinite(rightId) && leftId !== rightId) {
+        return leftId - rightId;
+      }
+
+      const position = left.compareDocumentPosition(right);
+      if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+      if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+      return 0;
+    }).at(-1);
   };
 
   const findClickableTarget = (element) => {
     return (
-      element.closest("button,a,[role='button'],[onclick],[tabindex]") ||
+      element.closest("button,a,[role='button'],[onclick],[tabindex],.menu_button,.mes_button,.tts_button,.tts-button") ||
       element
     );
   };
 
+  const isExcludedMessageAction = (element) => {
+    const identity = getElementText(element);
+    return /(delete|remove|trash|edit|copy|translate|bookmark|swipe|regenerate|impersonate|branch|qr|more|menu|删除|移除|编辑|复制|翻译|书签|重掷|刷新|更多|菜单)/i.test(identity);
+  };
+
+  const isProbablyVoiceControl = (element) => {
+    if (!(element instanceof HTMLElement)) return false;
+    if (element.id === BUTTON_ID || element.closest(`#${BUTTON_ID}`)) return false;
+    if (element.querySelector("audio,video")) return false;
+
+    const target = findClickableTarget(element);
+    if (!target || isExcludedMessageAction(target) || isExcludedMessageAction(element)) return false;
+
+    const text = getElementText(element);
+    const targetText = getElementText(target);
+    const combined = `${text} ${targetText}`;
+    const duration = parseDurationSeconds(combined);
+    const looksAudio = /(tts|voice|audio|sound|speaker|listen|read[-_\s]?aloud|play|volume|headphone|fa-volume|fa-play|朗读|播放|语音|音频|声音|喇叭|听)/i.test(combined);
+    const looksClickable = target.matches("button,a,[role='button'],[onclick],[tabindex],.menu_button,.mes_button,.tts_button,.tts-button");
+
+    if (!looksClickable && getStyle(target).cursor !== "pointer") return false;
+    if (!isVisibleInCurrentView(target)) return false;
+
+    const rect = target.getBoundingClientRect();
+    const compact = rect.width >= 8 && rect.width <= 520 && rect.height >= 8 && rect.height <= 120;
+
+    return compact && (looksAudio || duration !== null);
+  };
+
   const sortByPagePosition = (left, right) => {
-    const leftRect = left.getBoundingClientRect();
-    const rightRect = right.getBoundingClientRect();
+    const leftRect = left.source.getBoundingClientRect();
+    const rightRect = right.source.getBoundingClientRect();
     const topDelta = leftRect.top + window.scrollY - (rightRect.top + window.scrollY);
 
     if (Math.abs(topDelta) > 4) return topDelta;
     return leftRect.left + window.scrollX - (rightRect.left + window.scrollX);
   };
 
-  const getVoiceButtons = () => {
-    const candidates = collectElements("*")
-      .filter((element) => isVisibleInCurrentView(element) && isProbablyVoiceBubble(element))
+  const getLatestMessageSequence = () => {
+    const message = getLatestMessage();
+    if (!message) return { message: null, items: [] };
+
+    const audios = collectElements("audio", message)
+      .filter(hasPlayableSource)
+      .map((audio) => ({
+        type: "audio",
+        target: audio,
+        source: audio,
+        seconds: Number.isFinite(audio.duration) ? audio.duration : null
+      }));
+
+    const voiceControls = collectElements("button,a,[role='button'],[onclick],[tabindex],.tts,.tts_button,.tts-button,.voice,.audio,.sound,.speaker,.mes_button,*", message)
+      .filter(isProbablyVoiceControl)
       .map((element) => {
         const target = findClickableTarget(element);
         return {
+          type: "button",
           target,
-          seconds: parseDurationSeconds(getElementText(element)),
-          source: element
+          source: element,
+          seconds: parseDurationSeconds(getElementText(element) || getElementText(target))
         };
-      })
-      .filter((item) => item.target && isVisibleInCurrentView(item.target));
+      });
 
     const unique = [];
     const seen = new Set();
 
-    for (const item of candidates.sort((a, b) => sortByPagePosition(a.source, b.source))) {
-      if (seen.has(item.target)) continue;
-      if (unique.some((existing) => existing.target.contains(item.target))) continue;
+    for (const item of [...audios, ...voiceControls].sort(sortByPagePosition)) {
+      const key = item.target;
+      if (seen.has(key)) continue;
+      if (item.type === "button" && audios.some((audio) => audio.target === item.target || item.target.contains(audio.target))) continue;
 
-      seen.add(item.target);
+      seen.add(key);
       unique.push(item);
     }
 
-    return unique;
+    return { message, items: unique };
+  };
+
+  const wait = async (milliseconds) => {
+    const endAt = Date.now() + milliseconds;
+
+    while (Date.now() < endAt && !stopRequested) {
+      await new Promise((resolve) => window.setTimeout(resolve, Math.min(100, endAt - Date.now())));
+    }
+  };
+
+  const getDialoguePause = (previousItem, nextItem) => {
+    const previousSeconds = previousItem?.seconds || 2;
+    const nextSeconds = nextItem?.seconds || 2;
+    const base = previousSeconds < 2.5 ? 420 : previousSeconds < 7 ? 650 : 900;
+    const anticipation = nextSeconds > 8 ? 220 : 0;
+    const jitter = Math.round(Math.random() * 360);
+
+    return Math.min(1800, base + anticipation + jitter);
+  };
+
+  const waitBetweenDialogueLines = async (items, index) => {
+    if (stopRequested || index >= items.length - 1) return;
+    await wait(getDialoguePause(items[index], items[index + 1]));
   };
 
   const waitForAudioToEnd = (audio) => {
@@ -184,31 +296,14 @@
     });
   };
 
-  const wait = async (milliseconds) => {
-    const endAt = Date.now() + milliseconds;
-
-    while (Date.now() < endAt && !stopRequested) {
-      await new Promise((resolve) => window.setTimeout(resolve, Math.min(100, endAt - Date.now())));
-    }
-  };
-
-  const getDialoguePause = () => {
-    return Math.round(
-      DIALOGUE_PAUSE_MIN_MS + Math.random() * (DIALOGUE_PAUSE_MAX_MS - DIALOGUE_PAUSE_MIN_MS)
-    );
-  };
-
-  const waitBetweenDialogueLines = async (index, total) => {
-    if (stopRequested || index >= total - 1) return;
-    await wait(getDialoguePause());
-  };
+  const getAllAudios = () => collectElements("audio", document);
 
   const waitForAnyActiveAudio = async (fallbackSeconds) => {
-    const before = new Set(Array.from(document.querySelectorAll("audio")));
-    const deadline = Date.now() + 1200;
+    const before = new Set(getAllAudios());
+    const deadline = Date.now() + 1600;
 
     while (Date.now() < deadline && !stopRequested) {
-      const activeAudio = Array.from(document.querySelectorAll("audio"))
+      const activeAudio = getAllAudios()
         .filter((audio) => !before.has(audio) || !audio.paused)
         .find((audio) => !audio.paused && !audio.ended);
 
@@ -222,7 +317,15 @@
       await wait(80);
     }
 
-    await wait(Math.max(500, fallbackSeconds * 1000 + FALLBACK_END_BUFFER_MS));
+    await wait(Math.max(900, (fallbackSeconds || 2) * 1000 + 180));
+  };
+
+  const getElementCenter = (element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2
+    };
   };
 
   const sendRealClick = (x, y) => {
@@ -253,8 +356,6 @@
     element.focus?.({ preventScroll: true });
     element.dispatchEvent(new PointerEvent("pointerover", { ...eventOptions, pointerId: 1, pointerType: "mouse", isPrimary: true }));
     element.dispatchEvent(new MouseEvent("mouseover", eventOptions));
-    element.dispatchEvent(new PointerEvent("pointerenter", { ...eventOptions, pointerId: 1, pointerType: "mouse", isPrimary: true }));
-    element.dispatchEvent(new MouseEvent("mouseenter", eventOptions));
     element.dispatchEvent(new PointerEvent("pointerdown", { ...eventOptions, pointerId: 1, pointerType: "mouse", isPrimary: true }));
     element.dispatchEvent(new MouseEvent("mousedown", eventOptions));
     element.dispatchEvent(new PointerEvent("pointerup", { ...eventOptions, buttons: 0, pointerId: 1, pointerType: "mouse", isPrimary: true }));
@@ -265,7 +366,7 @@
     if (isTopFrame) {
       const realClickResponse = await sendRealClick(x, y);
       if (!realClickResponse?.ok) {
-        console.warn("[Gamepad Audio Sequencer] Real click failed:", realClickResponse?.error);
+        console.warn("[SillyTavern TTS Sequencer] Real click failed:", realClickResponse?.error);
       }
     }
   };
@@ -277,17 +378,18 @@
       return;
     }
 
-    const oldToast = document.getElementById("__side_audio_sequence_toast__");
+    const oldToast = document.getElementById(TOAST_ID);
     oldToast?.remove();
 
     const toast = document.createElement("div");
-    toast.id = "__side_audio_sequence_toast__";
+    toast.id = TOAST_ID;
     toast.textContent = message;
     toast.style.cssText = [
       "position:fixed",
       "right:16px",
       "bottom:16px",
       "z-index:2147483647",
+      "max-width:min(360px,calc(100vw - 32px))",
       "padding:10px 12px",
       "border-radius:8px",
       "background:rgba(20,20,20,.88)",
@@ -298,7 +400,15 @@
     ].join(";");
 
     root.appendChild(toast);
-    window.setTimeout(() => toast.remove(), 2200);
+    window.setTimeout(() => toast.remove(), 2400);
+  };
+
+  const updateFloatingButton = (isPlaying) => {
+    if (!floatingButton) return;
+
+    floatingButton.textContent = isPlaying ? "II" : ">";
+    floatingButton.title = isPlaying ? "暂停最新楼层 TTS 播放" : "播放最新楼层的所有 TTS 语音";
+    floatingButton.setAttribute("aria-label", floatingButton.title);
   };
 
   const stopPlayback = () => {
@@ -315,78 +425,70 @@
     showToast("已暂停顺序播放");
   };
 
-  const playNativeAudios = async (audios) => {
-    for (const [index, audio] of audios.entries()) {
-      if (stopRequested) break;
-
-      currentAudio = audio;
-      audio.pause();
-      audio.currentTime = 0;
-
-      try {
-        await audio.play();
-        await waitForAudioToEnd(audio);
-      } catch (error) {
-        console.warn("[Gamepad Audio Sequencer] Skipped audio:", error);
-      }
-
-      await waitBetweenDialogueLines(index, audios.length);
+  const playSequenceItem = async (item) => {
+    if (item.type === "audio") {
+      currentAudio = item.target;
+      item.target.pause();
+      item.target.currentTime = 0;
+      await item.target.play();
+      await waitForAudioToEnd(item.target);
+      currentAudio = null;
+      return;
     }
 
-    currentAudio = null;
-  };
-
-  const playVoiceButtons = async (voiceButtons) => {
-    for (const [index, item] of voiceButtons.entries()) {
-      if (stopRequested) break;
-
-      currentVoiceButton = item.target;
-
-      try {
-        await clickElement(item.target);
-        await waitForAnyActiveAudio(item.seconds || 2);
-      } catch (error) {
-        console.warn("[Gamepad Audio Sequencer] Skipped voice button:", error);
-      }
-
-      await waitBetweenDialogueLines(index, voiceButtons.length);
-    }
-
+    currentVoiceButton = item.target;
+    await clickElement(item.target);
+    await waitForAnyActiveAudio(item.seconds);
     currentVoiceButton = null;
   };
 
-  const playAudiosInOrder = async () => {
+  const playLatestMessageAudios = async () => {
+    if (!isSillyTavernPage()) {
+      if (isTopFrame) showToast("未检测到 SillyTavern 页面");
+      return;
+    }
+
     if (playing) {
       stopPlayback();
       return;
     }
 
-    const audios = getPlayableAudios();
-    const voiceButtons = getVoiceButtons();
-    const frameText = isTopFrame ? "主页面" : "iframe";
+    const { message, items } = getLatestMessageSequence();
+    if (!message) {
+      if (isTopFrame) showToast("没有找到 SillyTavern 对话楼层");
+      return;
+    }
 
-    showToast(`当前显示区域：标准音频 ${audios.length}，语音气泡 ${voiceButtons.length}（${frameText}）`);
-    await wait(350);
-
-    if (audios.length === 0 && voiceButtons.length === 0) {
-      if (isTopFrame) showToast("当前显示区域没有找到音频；滚动到语音气泡附近再按 P");
+    if (items.length === 0) {
+      if (isTopFrame) showToast("最新楼层里没有找到可播放的 TTS 语音");
       return;
     }
 
     playing = true;
     stopRequested = false;
     updateFloatingButton(true);
-    showToast(`开始顺序播放 ${audios.length + voiceButtons.length} 个音频`);
+    showToast(`开始播放最新楼层的 ${items.length} 段 TTS`);
 
-    await playNativeAudios(audios);
-    if (!stopRequested) await playVoiceButtons(voiceButtons);
-    playing = false;
+    for (const [index, item] of items.entries()) {
+      if (stopRequested) break;
 
-    if (!stopRequested) {
-      showToast("所有音频已播放完毕");
+      try {
+        await playSequenceItem(item);
+      } catch (error) {
+        console.warn("[SillyTavern TTS Sequencer] Skipped item:", error);
+      }
+
+      await waitBetweenDialogueLines(items, index);
     }
 
+    playing = false;
+    currentAudio = null;
+    currentVoiceButton = null;
     updateFloatingButton(false);
+
+    if (!stopRequested) {
+      showToast("最新楼层 TTS 已播放完毕");
+    }
   };
 
   const triggerPlayback = () => {
@@ -394,27 +496,80 @@
     if (now - lastTriggerAt < 350) return;
     lastTriggerAt = now;
 
-    playAudiosInOrder();
+    void playLatestMessageAudios();
   };
 
-  const broadcastPlaybackTrigger = () => {
-    if (!chrome?.runtime?.sendMessage) return;
+  const loadButtonPosition = () => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(POSITION_KEY) || "null");
+      if (!saved) return null;
 
-    chrome.runtime.sendMessage({ type: "playback-trigger" }, () => {
-      void chrome.runtime.lastError;
+      return {
+        left: Math.min(Math.max(8, Number(saved.left)), window.innerWidth - 52),
+        top: Math.min(Math.max(8, Number(saved.top)), window.innerHeight - 52)
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const saveButtonPosition = () => {
+    if (!floatingButton) return;
+    const rect = floatingButton.getBoundingClientRect();
+    window.localStorage.setItem(POSITION_KEY, JSON.stringify({ left: rect.left, top: rect.top }));
+  };
+
+  const setButtonPosition = (left, top) => {
+    if (!floatingButton) return;
+
+    const boundedLeft = Math.min(Math.max(8, left), window.innerWidth - 52);
+    const boundedTop = Math.min(Math.max(8, top), window.innerHeight - 52);
+
+    floatingButton.style.left = `${boundedLeft}px`;
+    floatingButton.style.top = `${boundedTop}px`;
+    floatingButton.style.right = "auto";
+    floatingButton.style.bottom = "auto";
+  };
+
+  const installDragHandlers = () => {
+    floatingButton.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+
+      const rect = floatingButton.getBoundingClientRect();
+      dragState = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        left: rect.left,
+        top: rect.top,
+        moved: false
+      };
+
+      floatingButton.setPointerCapture?.(event.pointerId);
+    });
+
+    floatingButton.addEventListener("pointermove", (event) => {
+      if (!dragState || event.pointerId !== dragState.pointerId) return;
+
+      const deltaX = event.clientX - dragState.startX;
+      const deltaY = event.clientY - dragState.startY;
+      if (Math.abs(deltaX) + Math.abs(deltaY) > 4) dragState.moved = true;
+
+      setButtonPosition(dragState.left + deltaX, dragState.top + deltaY);
+    });
+
+    floatingButton.addEventListener("pointerup", (event) => {
+      if (!dragState || event.pointerId !== dragState.pointerId) return;
+      saveButtonPosition();
+      window.setTimeout(() => {
+        dragState = null;
+      }, 0);
     });
   };
 
-  const updateFloatingButton = (isPlaying) => {
-    if (!floatingButton) return;
-
-    floatingButton.textContent = isPlaying ? "II" : ">";
-    floatingButton.title = isPlaying ? "暂停顺序播放" : "播放当前显示区域音频";
-    floatingButton.setAttribute("aria-label", floatingButton.title);
-  };
-
   const createFloatingButton = () => {
-    if (!isTopFrame || document.getElementById("__floating_audio_sequence_button__")) return;
+    if (!isTopFrame || floatingButton || document.getElementById(BUTTON_ID)) return;
+    if (!isSillyTavernPage()) return;
 
     const root = document.documentElement || document.body;
     if (!root) {
@@ -423,10 +578,10 @@
     }
 
     floatingButton = document.createElement("button");
-    floatingButton.id = "__floating_audio_sequence_button__";
+    floatingButton.id = BUTTON_ID;
     floatingButton.type = "button";
     floatingButton.textContent = ">";
-    floatingButton.title = "播放当前显示区域音频";
+    floatingButton.title = "播放最新楼层的所有 TTS 语音";
     floatingButton.setAttribute("aria-label", floatingButton.title);
     floatingButton.style.cssText = [
       "position:fixed",
@@ -444,11 +599,15 @@
       "display:flex",
       "align-items:center",
       "justify-content:center",
-      "cursor:pointer",
+      "cursor:grab",
       "padding:0",
       "user-select:none",
+      "touch-action:none",
       "pointer-events:auto"
     ].join(";");
+
+    const savedPosition = loadButtonPosition();
+    if (savedPosition) setButtonPosition(savedPosition.left, savedPosition.top);
 
     floatingButton.addEventListener("mouseenter", () => {
       floatingButton.style.transform = "scale(1.06)";
@@ -459,26 +618,44 @@
     floatingButton.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      broadcastPlaybackTrigger();
+
+      if (dragState?.moved) return;
       triggerPlayback();
     }, true);
 
+    installDragHandlers();
     root.appendChild(floatingButton);
+    window.setTimeout(() => showToast("SillyTavern TTS 气泡已就绪"), 500);
+  };
+
+  const watchForSillyTavern = () => {
+    if (!isTopFrame) return;
+
+    createFloatingButton();
+    if (floatingButton) return;
+
+    const observer = new MutationObserver(() => {
+      createFloatingButton();
+      if (floatingButton) observer.disconnect();
+    });
+
+    observer.observe(document.documentElement || document, { childList: true, subtree: true });
+    window.setTimeout(() => observer.disconnect(), 30000);
   };
 
   window.addEventListener("__keyboard_audio_sequencer_trigger__", () => {
-    broadcastPlaybackTrigger();
-    triggerPlayback();
+    if (isSillyTavernPage()) triggerPlayback();
   }, true);
 
   chrome?.runtime?.onMessage?.addListener((message) => {
-    if (message?.type === "trigger-playback") {
+    if (message?.type === "trigger-playback" && isSillyTavernPage()) {
       triggerPlayback();
     }
   });
 
-  if (isTopFrame) {
-    createFloatingButton();
-    window.setTimeout(() => showToast("悬浮音频按钮已就绪"), 900);
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", watchForSillyTavern, { once: true });
+  } else {
+    watchForSillyTavern();
   }
 })();
