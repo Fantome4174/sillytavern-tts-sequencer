@@ -63,6 +63,23 @@
     return Boolean(audio.currentSrc || audio.src || audio.querySelector("source[src]"));
   };
 
+  const CLICKABLE_SELECTOR = [
+    "button",
+    "a",
+    "[role='button']",
+    "[onclick]",
+    "[tabindex]",
+    ".menu_button",
+    ".mes_button",
+    ".tts",
+    ".tts_button",
+    ".tts-button",
+    ".voice",
+    ".audio",
+    ".sound",
+    ".speaker"
+  ].join(",");
+
   const getElementText = (element) => {
     return [
       element.innerText,
@@ -161,10 +178,21 @@
   };
 
   const findClickableTarget = (element) => {
-    return (
-      element.closest("button,a,[role='button'],[onclick],[tabindex],.menu_button,.mes_button,.tts_button,.tts-button") ||
-      element
-    );
+    const explicitTarget = element.closest(CLICKABLE_SELECTOR);
+    if (explicitTarget) return explicitTarget;
+
+    let current = element;
+    while (current instanceof HTMLElement && !current.classList.contains("mes")) {
+      const rect = current.getBoundingClientRect();
+      const compact = rect.width >= 8 && rect.width <= 560 && rect.height >= 8 && rect.height <= 140;
+      const hasDuration = parseDurationSeconds(getElementText(current)) !== null;
+      const looksInteractive = getStyle(current).cursor === "pointer" || typeof current.onclick === "function";
+
+      if (compact && (hasDuration || looksInteractive)) return current;
+      current = current.parentElement;
+    }
+
+    return element;
   };
 
   const isExcludedMessageAction = (element) => {
@@ -185,15 +213,15 @@
     const combined = `${text} ${targetText}`;
     const duration = parseDurationSeconds(combined);
     const looksAudio = /(tts|voice|audio|sound|speaker|listen|read[-_\s]?aloud|play|volume|headphone|fa-volume|fa-play|朗读|播放|语音|音频|声音|喇叭|听)/i.test(combined);
-    const looksClickable = target.matches("button,a,[role='button'],[onclick],[tabindex],.menu_button,.mes_button,.tts_button,.tts-button");
-
-    if (!looksClickable && getStyle(target).cursor !== "pointer") return false;
-    if (!isVisibleInCurrentView(target)) return false;
+    const looksClickable = target.matches(CLICKABLE_SELECTOR);
+    if (!isVisible(target)) return false;
 
     const rect = target.getBoundingClientRect();
-    const compact = rect.width >= 8 && rect.width <= 520 && rect.height >= 8 && rect.height <= 120;
+    const compact = rect.width >= 8 && rect.width <= 560 && rect.height >= 8 && rect.height <= 140;
+    const durationPill = duration !== null && compact && String(text || targetText).replace(/\s+/g, "").length <= 32;
+    const looksInteractive = looksClickable || getStyle(target).cursor === "pointer";
 
-    return compact && (looksAudio || duration !== null);
+    return compact && ((looksInteractive && looksAudio) || durationPill);
   };
 
   const sortByPagePosition = (left, right) => {
@@ -218,7 +246,7 @@
         seconds: Number.isFinite(audio.duration) ? audio.duration : null
       }));
 
-    const voiceControls = collectElements("button,a,[role='button'],[onclick],[tabindex],.tts,.tts_button,.tts-button,.voice,.audio,.sound,.speaker,.mes_button,*", message)
+    const voiceControls = collectElements("*", message)
       .filter(isProbablyVoiceControl)
       .map((element) => {
         const target = findClickableTarget(element);
@@ -237,6 +265,12 @@
       const key = item.target;
       if (seen.has(key)) continue;
       if (item.type === "button" && audios.some((audio) => audio.target === item.target || item.target.contains(audio.target))) continue;
+      if (unique.some((existing) => (
+        existing.target.contains(item.target) ||
+        item.target.contains(existing.target) ||
+        existing.source.contains(item.source) ||
+        item.source.contains(existing.source)
+      ))) continue;
 
       seen.add(key);
       unique.push(item);
@@ -342,6 +376,11 @@
   };
 
   const clickElement = async (element) => {
+    if (!isInViewport(element)) {
+      element.scrollIntoView?.({ block: "center", inline: "nearest", behavior: "instant" });
+      await wait(120);
+    }
+
     const { x, y } = getElementCenter(element);
     const eventOptions = {
       bubbles: true,
