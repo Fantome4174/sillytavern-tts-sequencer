@@ -31,7 +31,7 @@
     return elements;
   };
 
-  const getStyle = (element) => window.getComputedStyle(element);
+  const getStyle = (element, pseudoElement = null) => window.getComputedStyle(element, pseudoElement);
 
   const isVisible = (element) => {
     const style = getStyle(element);
@@ -80,10 +80,19 @@
     ".speaker"
   ].join(",");
 
+  const getPseudoText = (element) => {
+    return ["::before", "::after"]
+      .map((pseudo) => getStyle(element, pseudo).content)
+      .filter((content) => content && content !== "none" && content !== "normal")
+      .map((content) => content.replace(/^["']|["']$/g, ""))
+      .join(" ");
+  };
+
   const getElementText = (element) => {
     return [
       element.innerText,
       element.textContent,
+      getPseudoText(element),
       element.getAttribute("aria-label"),
       element.title,
       element.getAttribute("data-duration"),
@@ -92,14 +101,23 @@
       element.getAttribute("data-i18n"),
       element.getAttribute("data-tooltip"),
       element.getAttribute("data-original-title"),
+      element.getAttribute("data-title"),
+      element.getAttribute("data-content"),
+      element.getAttribute("data-seconds"),
+      element.getAttribute("data-length"),
+      element.getAttribute("alt"),
       element.getAttribute("class"),
       element.id
     ].filter(Boolean).join(" ");
   };
 
   const parseDurationSeconds = (text) => {
-    const normalized = String(text || "").trim();
-    const marked = normalized.match(/(\d+(?:\.\d+)?)\s*(?:"|秒|s\b|sec\b|secs\b|second|seconds)/i);
+    const normalized = String(text || "")
+      .replace(/&quot;|&#34;|&#x22;/gi, "\"")
+      .replace(/&prime;|&#8242;|&#x2032;/gi, "'")
+      .replace(/&Prime;|&#8243;|&#x2033;/gi, "\"")
+      .trim();
+    const marked = normalized.match(/(\d+(?:\.\d+)?)\s*(?:"|“|”|＂|″|''|′|'|秒|秒钟|s\b|sec\b|secs\b|second|seconds)/i);
     const clock = normalized.match(/\b(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b/);
     const plainNumber = normalized.match(/^\D*(\d{1,3}(?:\.\d+)?)\D*$/);
 
@@ -182,17 +200,20 @@
     if (explicitTarget) return explicitTarget;
 
     let current = element;
+    let compactDurationTarget = null;
     while (current instanceof HTMLElement && !current.classList.contains("mes")) {
       const rect = current.getBoundingClientRect();
       const compact = rect.width >= 8 && rect.width <= 560 && rect.height >= 8 && rect.height <= 140;
       const hasDuration = parseDurationSeconds(getElementText(current)) !== null;
       const looksInteractive = getStyle(current).cursor === "pointer" || typeof current.onclick === "function";
 
-      if (compact && (hasDuration || looksInteractive)) return current;
+      if (compact && (hasDuration || looksInteractive)) {
+        compactDurationTarget = current;
+      }
       current = current.parentElement;
     }
 
-    return element;
+    return compactDurationTarget || element;
   };
 
   const isExcludedMessageAction = (element) => {
@@ -233,10 +254,7 @@
     return leftRect.left + window.scrollX - (rightRect.left + window.scrollX);
   };
 
-  const getLatestMessageSequence = () => {
-    const message = getLatestMessage();
-    if (!message) return { message: null, items: [] };
-
+  const collectSequenceItemsFromMessage = (message) => {
     const audios = collectElements("audio", message)
       .filter(hasPlayableSource)
       .map((audio) => ({
@@ -276,7 +294,30 @@
       unique.push(item);
     }
 
-    return { message, items: unique };
+    return unique;
+  };
+
+  const getLatestMessageSequence = () => {
+    const latestMessage = getLatestMessage();
+    if (!latestMessage) return { message: null, items: [], usedFallback: false };
+
+    const latestItems = collectSequenceItemsFromMessage(latestMessage);
+    if (latestItems.length > 0) {
+      return { message: latestMessage, items: latestItems, usedFallback: false };
+    }
+
+    const messages = getMessageElements();
+    const fallbackMessage = messages
+      .filter((message) => message !== latestMessage)
+      .reverse()
+      .map((message) => ({ message, items: collectSequenceItemsFromMessage(message) }))
+      .find((result) => result.items.length > 0);
+
+    if (fallbackMessage) {
+      return { ...fallbackMessage, usedFallback: true };
+    }
+
+    return { message: latestMessage, items: [], usedFallback: false };
   };
 
   const wait = async (milliseconds) => {
@@ -488,7 +529,7 @@
       return;
     }
 
-    const { message, items } = getLatestMessageSequence();
+    const { message, items, usedFallback } = getLatestMessageSequence();
     if (!message) {
       if (isTopFrame) showToast("没有找到 SillyTavern 对话楼层");
       return;
@@ -502,7 +543,7 @@
     playing = true;
     stopRequested = false;
     updateFloatingButton(true);
-    showToast(`开始播放最新楼层的 ${items.length} 段 TTS`);
+    showToast(`${usedFallback ? "最新楼层无 TTS，改播最近楼层" : "开始播放最新楼层"}：${items.length} 段 TTS`);
 
     for (const [index, item] of items.entries()) {
       if (stopRequested) break;
