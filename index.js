@@ -42,9 +42,17 @@
   let countRefreshTimer = null;
   let longPressTimer = null;
   let mobileAudioPrimed = false;
+  let mobileAudioContext = null;
+  let currentMobileSource = null;
 
   const isMobileViewport = () => {
-    return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
+    const userAgent = navigator.userAgent || "";
+    return (
+      window.matchMedia?.("(pointer: coarse)").matches ||
+      window.innerWidth <= 900 ||
+      navigator.maxTouchPoints > 0 ||
+      /Android|iPhone|iPad|iPod|Mobile|Silk|Kindle/i.test(userAgent)
+    );
   };
 
   const collectElements = (selector, root = document) => {
@@ -106,6 +114,17 @@
     return audio;
   };
 
+  const getMobileAudioContext = () => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return null;
+
+    if (!mobileAudioContext || mobileAudioContext.state === "closed") {
+      mobileAudioContext = new AudioContextClass();
+    }
+
+    return mobileAudioContext;
+  };
+
   const primeMobileAudio = () => {
     if (!isMobileViewport()) return;
 
@@ -134,6 +153,28 @@
       }
     } catch {
       mobileAudioPrimed = false;
+    }
+
+    try {
+      const context = getMobileAudioContext();
+      if (!context) return;
+
+      const resumePromise = context.state === "suspended" ? context.resume() : Promise.resolve();
+      resumePromise.then(() => {
+        const source = context.createBufferSource();
+        const gain = context.createGain();
+        gain.gain.value = 0;
+        source.buffer = context.createBuffer(1, 1, context.sampleRate);
+        source.connect(gain);
+        gain.connect(context.destination);
+        source.start(0);
+        source.stop(context.currentTime + 0.01);
+        mobileAudioPrimed = true;
+      }).catch(() => {
+        if (!mobileAudioPrimed) mobileAudioPrimed = false;
+      });
+    } catch {
+      if (!mobileAudioPrimed) mobileAudioPrimed = false;
     }
   };
 
@@ -579,12 +620,68 @@
     return true;
   };
 
-  const playWithMobileAudio = async (bubble, audioUrl) => {
+  const stopMobileWebAudio = () => {
+    if (!currentMobileSource) return;
+
+    try {
+      currentMobileSource.stop(0);
+    } catch {
+      // The source may already be stopped.
+    }
+    currentMobileSource = null;
+  };
+
+  const decodeAudioBuffer = (context, arrayBuffer) => {
+    try {
+      const decodeResult = context.decodeAudioData(arrayBuffer.slice(0));
+      if (decodeResult?.then) return decodeResult;
+    } catch {
+      // Older mobile browsers require the callback form below.
+    }
+
+    return new Promise((resolve, reject) => {
+      context.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
+    });
+  };
+
+  const playWithMobileWebAudio = async (audioUrl) => {
+    const context = getMobileAudioContext();
+    if (!context) throw new Error("Mobile WebAudio is not available");
+    if (context.state === "suspended") await context.resume();
+
+    const resolvedAudioUrl = new URL(audioUrl, window.location.href).href;
+    const fetchOptions = /^https?:/i.test(resolvedAudioUrl)
+      ? { credentials: "include", cache: "no-store" }
+      : {};
+    const response = await fetch(resolvedAudioUrl, fetchOptions);
+    if (!response.ok) throw new Error(`Audio fetch failed: ${response.status}`);
+
+    const audioBuffer = await decodeAudioBuffer(context, await response.arrayBuffer());
+    if (stopRequested) return;
+
+    stopMobileWebAudio();
+
+    await new Promise((resolve, reject) => {
+      try {
+        const source = context.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(context.destination);
+        currentMobileSource = source;
+        source.onended = () => {
+          if (currentMobileSource === source) currentMobileSource = null;
+          resolve();
+        };
+        source.start(0);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  };
+
+  const playWithMobileHtmlAudio = async (audioUrl) => {
     const audio = getMobileAudio();
 
-    stopNativeVoiceBubblePlayback();
     currentAudio = audio;
-    bubble.classList.add("playing");
 
     try {
       audio.pause();
@@ -616,8 +713,23 @@
           mobileAudioPrimed = false;
         }
       }
-      bubble.classList.remove("playing");
       if (currentAudio === audio) currentAudio = null;
+    }
+  };
+
+  const playWithMobileAudio = async (bubble, audioUrl) => {
+    stopNativeVoiceBubblePlayback();
+    stopMobileWebAudio();
+    bubble.classList.add("playing");
+
+    try {
+      await playWithMobileWebAudio(audioUrl);
+      mobileAudioPrimed = true;
+    } catch (error) {
+      console.warn("[SillyTavern TTS Sequencer] WebAudio mobile playback failed, falling back to HTMLAudio:", error);
+      await playWithMobileHtmlAudio(audioUrl);
+    } finally {
+      bubble.classList.remove("playing");
     }
   };
 
@@ -1015,6 +1127,7 @@
       currentAudio.pause();
       currentAudio = null;
     }
+    stopMobileWebAudio();
     if (currentVoiceBubble) {
       currentVoiceBubble.classList.remove("playing");
       currentVoiceBubble = null;
@@ -1302,16 +1415,20 @@
     playLatest: playLatestMessageAudios,
     mobilePlaybackState: () => ({
       isMobile: isMobileViewport(),
-      strategy: "single-mobile-audio",
+      strategy: "mobile-webaudio-first",
       primed: mobileAudioPrimed,
+      audioContextState: mobileAudioContext?.state || null,
+      hasActiveWebAudioSource: Boolean(currentMobileSource),
       currentBubbleKey: getVoiceBubbleKey(currentVoiceBubble)
     }),
     mobileAudioState: () => {
       const audio = document.getElementById(MOBILE_AUDIO_ID);
       return {
         isMobile: isMobileViewport(),
-        strategy: "single-mobile-audio",
+        strategy: "mobile-webaudio-first",
         primed: mobileAudioPrimed,
+        audioContextState: mobileAudioContext?.state || null,
+        hasActiveWebAudioSource: Boolean(currentMobileSource),
         exists: audio instanceof HTMLAudioElement,
         paused: audio instanceof HTMLAudioElement ? audio.paused : null,
         muted: audio instanceof HTMLAudioElement ? audio.muted : null,
@@ -1320,6 +1437,18 @@
         currentBubbleKey: getVoiceBubbleKey(currentVoiceBubble)
       };
     },
+    diagnose: () => ({
+      isMobile: isMobileViewport(),
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        maxTouchPoints: navigator.maxTouchPoints || 0,
+        coarsePointer: Boolean(window.matchMedia?.("(pointer: coarse)").matches)
+      },
+      latestTtsCount: getLatestMessageTtsCount(),
+      mobile: window.STTtsSequencer.mobileAudioState(),
+      latest: getLatestMessageSequence()
+    }),
     resetButtonPosition: () => {
       window.localStorage.removeItem(getPositionKey());
       if (!floatingButton) return;
