@@ -3,6 +3,7 @@
   const TOAST_ID = "st-tts-sequencer-toast";
   const PLAYER_ID = "st-tts-sequencer-audio";
   const POSITION_KEY = "st-tts-sequencer-button-position";
+  const SILENCE_SRC = "/sounds/silence.mp3";
   const CLICKABLE_SELECTOR = [
     "button",
     "a",
@@ -34,6 +35,8 @@
   let buttonObserver = null;
   let sequencerAudio = null;
   let currentVoiceBubble = null;
+  let playbackRunId = 0;
+  let unlockPromise = null;
 
   const isMobileViewport = () => {
     return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
@@ -91,6 +94,17 @@
     }
 
     return sequencerAudio;
+  };
+
+  const getVoiceBubbleKey = (bubble) => {
+    return bubble?.getAttribute?.("data-key") || bubble?.dataset?.key || "";
+  };
+
+  const findVoiceBubbleByKey = (key) => {
+    if (!key) return null;
+
+    return collectElements(".voice-bubble[data-key]", document)
+      .find((bubble) => getVoiceBubbleKey(bubble) === key) || null;
   };
 
   const getPseudoText = (element) => {
@@ -368,18 +382,19 @@
   };
 
   const getVoiceBubbleAudioUrl = (bubble) => {
-    const key = bubble.getAttribute("data-key") || bubble.dataset.key;
+    const key = getVoiceBubbleKey(bubble);
+    const liveBubble = findVoiceBubbleByKey(key) || bubble;
     const cachedUrl = key && window.TTS_State?.CACHE?.audioMemory?.[key];
 
     return (
-      bubble.getAttribute("data-audio-url") ||
-      bubble.dataset.audioUrl ||
+      liveBubble?.getAttribute?.("data-audio-url") ||
+      liveBubble?.dataset?.audioUrl ||
       cachedUrl ||
       ""
     );
   };
 
-  const waitForVoiceBubbleAudioUrl = (bubble, timeout = 90000) => {
+  const waitForVoiceBubbleAudioUrl = (bubble, runId, timeout = 90000) => {
     return new Promise((resolve) => {
       const existingUrl = getVoiceBubbleAudioUrl(bubble);
       if (existingUrl) {
@@ -397,7 +412,7 @@
       };
 
       const check = () => {
-        if (stopRequested) {
+        if (stopRequested || runId !== playbackRunId) {
           cleanup();
           resolve("");
           return;
@@ -417,7 +432,12 @@
       };
 
       observer = new MutationObserver(check);
-      observer.observe(bubble, { attributes: true, attributeFilter: ["data-audio-url", "data-status", "class"] });
+      observer.observe(document.body || document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-audio-url", "data-status", "class"]
+      });
       timer = window.setInterval(check, 250);
       check();
     });
@@ -425,10 +445,17 @@
 
   const queueVoiceBubbleGeneration = async (bubble) => {
     const status = bubble.getAttribute("data-status");
-    if (getVoiceBubbleAudioUrl(bubble) || status === "queued" || status === "generating") return;
+    if (getVoiceBubbleAudioUrl(bubble)) return;
 
     const scheduler = window.TTS_Scheduler;
     const jquery = window.jQuery || window.$;
+
+    if (status === "queued" || status === "generating") {
+      if (scheduler && typeof scheduler.run === "function" && !scheduler.isRunning && scheduler.queue?.length > 0) {
+        await scheduler.run();
+      }
+      return;
+    }
 
     if (scheduler && jquery && typeof scheduler.addToQueue === "function" && typeof scheduler.run === "function") {
       const $bubble = jquery(bubble);
@@ -448,28 +475,33 @@
 
     currentAudio = audio;
     audio.pause();
+    audio.loop = false;
     audio.src = url;
     audio.currentTime = 0;
     audio.volume = 1;
     audio.muted = false;
-    await audio.play();
+    await audio.play().catch((error) => {
+      showToast("手机浏览器拦截了自动播放，请再点一次气泡");
+      throw error;
+    });
     await waitForAudioToEnd(audio);
     currentAudio = null;
   };
 
-  const playVoiceBubble = async (bubble) => {
+  const playVoiceBubble = async (bubble, runId) => {
     currentVoiceBubble = bubble;
     window.TTS_Events?.playAudio?.(null, null);
     await queueVoiceBubbleGeneration(bubble);
 
-    const audioUrl = await waitForVoiceBubbleAudioUrl(bubble);
+    const audioUrl = await waitForVoiceBubbleAudioUrl(bubble, runId);
     if (!audioUrl) throw new Error("Voice bubble audio URL was not generated");
 
-    bubble.classList.add("playing");
+    const liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(bubble)) || bubble;
+    liveBubble.classList.add("playing");
     try {
       await playAudioUrl(audioUrl);
     } finally {
-      bubble.classList.remove("playing");
+      liveBubble.classList.remove("playing");
       currentVoiceBubble = null;
     }
   };
@@ -525,32 +557,38 @@
   };
 
   const unlockMediaPlayback = async () => {
-    if (mediaUnlocked) return;
-    mediaUnlocked = true;
+    if (unlockPromise) return unlockPromise;
 
-    try {
-      const audio = getSequencerAudio();
-      audio.muted = true;
-      audio.src = "/sounds/silence.mp3";
-      await audio.play().catch(() => {});
-      audio.pause();
-      audio.removeAttribute("src");
-      audio.load();
-      audio.muted = false;
-    } catch {
-      // A best-effort unlock is enough; the real playback path will still report errors.
-    }
-
-    try {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      if (AudioContextClass) {
-        const context = new AudioContextClass();
-        if (context.state === "suspended") await context.resume();
-        await context.close?.();
+    unlockPromise = (async () => {
+      try {
+        const audio = getSequencerAudio();
+        audio.setAttribute("playsinline", "true");
+        audio.muted = true;
+        audio.loop = true;
+        if (!audio.src || !audio.src.includes(SILENCE_SRC)) {
+          audio.src = SILENCE_SRC;
+        }
+        await audio.play().catch(() => {});
+        mediaUnlocked = true;
+      } catch {
+        // A best-effort unlock is enough; the real playback path will still report errors.
       }
-    } catch {
-      // Mobile browsers differ here; failing to unlock should not stop playback attempts.
-    }
+
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (AudioContextClass) {
+          const context = new AudioContextClass();
+          if (context.state === "suspended") await context.resume();
+          await context.close?.();
+        }
+      } catch {
+        // Mobile browsers differ here; failing to unlock should not stop playback attempts.
+      } finally {
+        unlockPromise = null;
+      }
+    })();
+
+    return unlockPromise;
   };
 
   const clickElement = async (element) => {
@@ -645,8 +683,11 @@
   };
 
   const stopPlayback = () => {
+    playbackRunId += 1;
+    playing = false;
     stopRequested = true;
     if (currentAudio) {
+      currentAudio.loop = false;
       currentAudio.pause();
       currentAudio = null;
     }
@@ -662,7 +703,9 @@
     showToast("已暂停顺序播放");
   };
 
-  const playSequenceItem = async (item) => {
+  const playSequenceItem = async (item, runId) => {
+    if (runId !== playbackRunId || stopRequested) return;
+
     if (item.type === "audio") {
       currentAudio = item.target;
       item.target.pause();
@@ -674,7 +717,7 @@
     }
 
     if (item.type === "voice-bubble") {
-      await playVoiceBubble(item.target);
+      await playVoiceBubble(item.target, runId);
       return;
     }
 
@@ -703,14 +746,16 @@
 
     playing = true;
     stopRequested = false;
+    const runId = playbackRunId + 1;
+    playbackRunId = runId;
     updateFloatingButton(true);
     showToast(`${usedFallback ? "最新楼层无 TTS，改播最近楼层" : "开始播放最新楼层"}：${items.length} 段 TTS`);
 
     for (const [index, item] of items.entries()) {
-      if (stopRequested) break;
+      if (stopRequested || runId !== playbackRunId) break;
 
       try {
-        await playSequenceItem(item);
+        await playSequenceItem(item, runId);
       } catch (error) {
         console.warn("[SillyTavern TTS Sequencer] Skipped item:", error);
       }
@@ -718,9 +763,12 @@
       await waitBetweenDialogueLines(items, index);
     }
 
+    if (runId !== playbackRunId) return;
+
     playing = false;
     currentAudio = null;
     currentVoiceButton = null;
+    currentVoiceBubble = null;
     updateFloatingButton(false);
 
     if (!stopRequested) {
@@ -732,6 +780,11 @@
     const now = Date.now();
     if (now - lastTriggerAt < 350) return;
     lastTriggerAt = now;
+
+    if (playing) {
+      stopPlayback();
+      return;
+    }
 
     void unlockMediaPlayback().finally(() => playLatestMessageAudios());
   };
