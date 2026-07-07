@@ -3,8 +3,10 @@
   const TOAST_ID = "st-tts-sequencer-toast";
   const COUNT_BADGE_ID = "st-tts-sequencer-count";
   const SETTINGS_PANEL_ID = "st-tts-sequencer-settings";
+  const MOBILE_AUDIO_ID = "st-tts-sequencer-mobile-audio";
   const POSITION_KEY = "st-tts-sequencer-button-position";
   const PAUSE_KEY = "st-tts-sequencer-dialogue-pause-ms";
+  const SILENCE_SRC = "/sounds/silence.mp3";
   const DEFAULT_FIXED_PAUSE_MS = 800;
   const CLICKABLE_SELECTOR = [
     "button",
@@ -39,6 +41,7 @@
   let playbackRunId = 0;
   let countRefreshTimer = null;
   let longPressTimer = null;
+  let mobileAudioPrimed = false;
 
   const isMobileViewport = () => {
     return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
@@ -80,6 +83,58 @@
 
   const hasPlayableSource = (audio) => {
     return Boolean(audio.currentSrc || audio.src || audio.querySelector("source[src]"));
+  };
+
+  const getMobileAudio = () => {
+    let audio = document.getElementById(MOBILE_AUDIO_ID);
+    if (!(audio instanceof HTMLAudioElement)) {
+      audio = document.createElement("audio");
+      audio.id = MOBILE_AUDIO_ID;
+      audio.preload = "auto";
+      audio.setAttribute("playsinline", "true");
+      audio.setAttribute("webkit-playsinline", "true");
+      audio.style.position = "fixed";
+      audio.style.left = "-1px";
+      audio.style.bottom = "-1px";
+      audio.style.width = "1px";
+      audio.style.height = "1px";
+      audio.style.opacity = "0.01";
+      audio.style.pointerEvents = "none";
+      (document.body || document.documentElement).appendChild(audio);
+    }
+
+    return audio;
+  };
+
+  const primeMobileAudio = () => {
+    if (!isMobileViewport()) return;
+
+    try {
+      const audio = getMobileAudio();
+      audio.setAttribute("playsinline", "true");
+      audio.setAttribute("webkit-playsinline", "true");
+      audio.muted = true;
+      audio.loop = true;
+      audio.volume = 0;
+
+      if (!audio.src || !audio.src.includes(SILENCE_SRC)) {
+        audio.src = SILENCE_SRC;
+        audio.load();
+      }
+
+      const playPromise = audio.play();
+      if (playPromise?.then) {
+        playPromise.then(() => {
+          mobileAudioPrimed = true;
+        }).catch(() => {
+          mobileAudioPrimed = false;
+        });
+      } else {
+        mobileAudioPrimed = true;
+      }
+    } catch {
+      mobileAudioPrimed = false;
+    }
   };
 
   const getVoiceBubbleKey = (bubble) => {
@@ -524,6 +579,52 @@
     return true;
   };
 
+  const playWithMobileAudio = async (bubble, audioUrl) => {
+    const audio = getMobileAudio();
+
+    stopNativeVoiceBubblePlayback();
+    currentAudio = audio;
+    bubble.classList.add("playing");
+
+    try {
+      audio.pause();
+      audio.loop = false;
+      audio.muted = false;
+      audio.volume = 1;
+      audio.src = audioUrl;
+      audio.currentTime = 0;
+      audio.load();
+
+      await audio.play();
+      mobileAudioPrimed = true;
+      await waitForAudioToEnd(audio);
+    } catch (error) {
+      mobileAudioPrimed = false;
+      showToast("手机浏览器拦截了播放，请再点一次播放气泡");
+      throw error;
+    } finally {
+      if (stopRequested) {
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+      } else {
+        try {
+          audio.muted = true;
+          audio.loop = true;
+          audio.volume = 0;
+          audio.src = SILENCE_SRC;
+          audio.load();
+          await audio.play();
+          mobileAudioPrimed = true;
+        } catch {
+          mobileAudioPrimed = false;
+        }
+      }
+      bubble.classList.remove("playing");
+      if (currentAudio === audio) currentAudio = null;
+    }
+  };
+
   const playVoiceBubble = async (bubble, runId) => {
     let liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(bubble)) || bubble;
     currentVoiceBubble = liveBubble;
@@ -538,6 +639,11 @@
     liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(liveBubble)) || liveBubble;
 
     try {
+      if (isMobileViewport()) {
+        await playWithMobileAudio(liveBubble, audioUrl);
+        return;
+      }
+
       if (liveBubble.classList.contains("playing")) {
         stopNativeVoiceBubblePlayback();
         await wait(120);
@@ -879,6 +985,15 @@
       currentVoiceBubble.classList.remove("playing");
       currentVoiceBubble = null;
     }
+    if (isMobileViewport()) {
+      const audio = document.getElementById(MOBILE_AUDIO_ID);
+      if (audio instanceof HTMLAudioElement) {
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+      }
+      mobileAudioPrimed = false;
+    }
     stopNativeVoiceBubblePlayback();
     if (currentVoiceButton) {
       void clickElement(currentVoiceButton);
@@ -971,6 +1086,7 @@
       return;
     }
 
+    primeMobileAudio();
     void unlockMediaPlayback();
     void playLatestMessageAudios();
   };
@@ -1092,10 +1208,12 @@
     if (savedPosition) setButtonPosition(savedPosition.left, savedPosition.top);
 
     floatingButton.addEventListener("pointerdown", () => {
+      primeMobileAudio();
       void unlockMediaPlayback();
     }, true);
 
     floatingButton.addEventListener("touchstart", () => {
+      primeMobileAudio();
       void unlockMediaPlayback();
     }, { passive: true, capture: true });
 
@@ -1148,6 +1266,18 @@
   window.STTtsSequencer = {
     scanLatest: getLatestMessageSequence,
     playLatest: playLatestMessageAudios,
+    mobileAudioState: () => {
+      const audio = document.getElementById(MOBILE_AUDIO_ID);
+      return {
+        isMobile: isMobileViewport(),
+        primed: mobileAudioPrimed,
+        exists: audio instanceof HTMLAudioElement,
+        paused: audio instanceof HTMLAudioElement ? audio.paused : null,
+        muted: audio instanceof HTMLAudioElement ? audio.muted : null,
+        src: audio instanceof HTMLAudioElement ? audio.currentSrc || audio.src : "",
+        readyState: audio instanceof HTMLAudioElement ? audio.readyState : null
+      };
+    },
     resetButtonPosition: () => {
       window.localStorage.removeItem(getPositionKey());
       if (!floatingButton) return;
