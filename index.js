@@ -1,6 +1,7 @@
 (() => {
   const BUTTON_ID = "st-tts-sequencer-button";
   const TOAST_ID = "st-tts-sequencer-toast";
+  const PLAYER_ID = "st-tts-sequencer-audio";
   const POSITION_KEY = "st-tts-sequencer-button-position";
   const CLICKABLE_SELECTOR = [
     "button",
@@ -14,9 +15,12 @@
     ".tts_button",
     ".tts-button",
     ".voice",
+    ".voice-bubble",
     ".audio",
     ".sound",
-    ".speaker"
+    ".speaker",
+    "[data-audio-url]",
+    "[data-status][data-key]"
   ].join(",");
 
   let playing = false;
@@ -28,6 +32,8 @@
   let lastTriggerAt = 0;
   let mediaUnlocked = false;
   let buttonObserver = null;
+  let sequencerAudio = null;
+  let currentVoiceBubble = null;
 
   const isMobileViewport = () => {
     return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
@@ -69,6 +75,22 @@
 
   const hasPlayableSource = (audio) => {
     return Boolean(audio.currentSrc || audio.src || audio.querySelector("source[src]"));
+  };
+
+  const getSequencerAudio = () => {
+    if (sequencerAudio instanceof HTMLAudioElement) return sequencerAudio;
+
+    sequencerAudio = document.getElementById(PLAYER_ID);
+    if (!(sequencerAudio instanceof HTMLAudioElement)) {
+      sequencerAudio = document.createElement("audio");
+      sequencerAudio.id = PLAYER_ID;
+      sequencerAudio.preload = "auto";
+      sequencerAudio.setAttribute("playsinline", "true");
+      sequencerAudio.style.display = "none";
+      (document.body || document.documentElement).appendChild(sequencerAudio);
+    }
+
+    return sequencerAudio;
   };
 
   const getPseudoText = (element) => {
@@ -197,12 +219,13 @@
     const target = findClickableTarget(element);
     if (!target || isExcludedMessageAction(target) || isExcludedMessageAction(element)) return false;
     if (!isVisible(target)) return false;
+    if (target.closest(".voice-bubble")) return true;
 
     const text = getElementText(element);
     const targetText = getElementText(target);
     const combined = `${text} ${targetText}`;
     const duration = parseDurationSeconds(combined);
-    const looksAudio = /(tts|voice|audio|sound|speaker|listen|read[-_\s]?aloud|play|volume|headphone|fa-volume|fa-play|朗读|播放|语音|音频|声音|喇叭|听)/i.test(combined);
+    const looksAudio = /(tts|voice|audio|sound|speaker|listen|read[-_\s]?aloud|play|volume|headphone|fa-volume|fa-play|voice-bubble|sovits|朗读|播放|语音|音频|声音|喇叭|听)/i.test(combined);
     const looksClickable = target.matches(CLICKABLE_SELECTOR);
     const rect = target.getBoundingClientRect();
     const compact = rect.width >= 8 && rect.width <= 560 && rect.height >= 8 && rect.height <= 140;
@@ -235,9 +258,10 @@
       .filter(isProbablyVoiceControl)
       .map((element) => {
         const target = findClickableTarget(element);
+        const voiceBubble = target.closest(".voice-bubble") || element.closest(".voice-bubble");
         return {
-          type: "button",
-          target,
+          type: voiceBubble ? "voice-bubble" : "button",
+          target: voiceBubble || target,
           source: element,
           seconds: parseDurationSeconds(getElementText(element) || getElementText(target))
         };
@@ -343,6 +367,113 @@
     await wait(Math.max(900, (fallbackSeconds || 2) * 1000 + 180));
   };
 
+  const getVoiceBubbleAudioUrl = (bubble) => {
+    const key = bubble.getAttribute("data-key") || bubble.dataset.key;
+    const cachedUrl = key && window.TTS_State?.CACHE?.audioMemory?.[key];
+
+    return (
+      bubble.getAttribute("data-audio-url") ||
+      bubble.dataset.audioUrl ||
+      cachedUrl ||
+      ""
+    );
+  };
+
+  const waitForVoiceBubbleAudioUrl = (bubble, timeout = 90000) => {
+    return new Promise((resolve) => {
+      const existingUrl = getVoiceBubbleAudioUrl(bubble);
+      if (existingUrl) {
+        resolve(existingUrl);
+        return;
+      }
+
+      const startedAt = Date.now();
+      let observer = null;
+      let timer = null;
+
+      const cleanup = () => {
+        observer?.disconnect();
+        window.clearTimeout(timer);
+      };
+
+      const check = () => {
+        if (stopRequested) {
+          cleanup();
+          resolve("");
+          return;
+        }
+
+        const url = getVoiceBubbleAudioUrl(bubble);
+        if (url) {
+          cleanup();
+          resolve(url);
+          return;
+        }
+
+        if (Date.now() - startedAt >= timeout) {
+          cleanup();
+          resolve("");
+        }
+      };
+
+      observer = new MutationObserver(check);
+      observer.observe(bubble, { attributes: true, attributeFilter: ["data-audio-url", "data-status", "class"] });
+      timer = window.setInterval(check, 250);
+      check();
+    });
+  };
+
+  const queueVoiceBubbleGeneration = async (bubble) => {
+    const status = bubble.getAttribute("data-status");
+    if (getVoiceBubbleAudioUrl(bubble) || status === "queued" || status === "generating") return;
+
+    const scheduler = window.TTS_Scheduler;
+    const jquery = window.jQuery || window.$;
+
+    if (scheduler && jquery && typeof scheduler.addToQueue === "function" && typeof scheduler.run === "function") {
+      const $bubble = jquery(bubble);
+      if (status === "error") {
+        $bubble.removeClass("error").attr("data-status", "waiting");
+      }
+      scheduler.addToQueue($bubble);
+      await scheduler.run();
+      return;
+    }
+
+    await clickElement(bubble);
+  };
+
+  const playAudioUrl = async (url) => {
+    const audio = getSequencerAudio();
+
+    currentAudio = audio;
+    audio.pause();
+    audio.src = url;
+    audio.currentTime = 0;
+    audio.volume = 1;
+    audio.muted = false;
+    await audio.play();
+    await waitForAudioToEnd(audio);
+    currentAudio = null;
+  };
+
+  const playVoiceBubble = async (bubble) => {
+    currentVoiceBubble = bubble;
+    window.TTS_Events?.playAudio?.(null, null);
+    await queueVoiceBubbleGeneration(bubble);
+
+    const audioUrl = await waitForVoiceBubbleAudioUrl(bubble);
+    if (!audioUrl) throw new Error("Voice bubble audio URL was not generated");
+
+    bubble.classList.add("playing");
+    try {
+      await playAudioUrl(audioUrl);
+    } finally {
+      bubble.classList.remove("playing");
+      currentVoiceBubble = null;
+    }
+  };
+
   const getDialoguePause = (previousItem, nextItem) => {
     const previousSeconds = previousItem?.seconds || 2;
     const nextSeconds = nextItem?.seconds || 2;
@@ -396,6 +527,19 @@
   const unlockMediaPlayback = async () => {
     if (mediaUnlocked) return;
     mediaUnlocked = true;
+
+    try {
+      const audio = getSequencerAudio();
+      audio.muted = true;
+      audio.src = "/sounds/silence.mp3";
+      await audio.play().catch(() => {});
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      audio.muted = false;
+    } catch {
+      // A best-effort unlock is enough; the real playback path will still report errors.
+    }
 
     try {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -506,6 +650,10 @@
       currentAudio.pause();
       currentAudio = null;
     }
+    if (currentVoiceBubble) {
+      currentVoiceBubble.classList.remove("playing");
+      currentVoiceBubble = null;
+    }
     if (currentVoiceButton) {
       void clickElement(currentVoiceButton);
     }
@@ -522,6 +670,11 @@
       await item.target.play();
       await waitForAudioToEnd(item.target);
       currentAudio = null;
+      return;
+    }
+
+    if (item.type === "voice-bubble") {
+      await playVoiceBubble(item.target);
       return;
     }
 
