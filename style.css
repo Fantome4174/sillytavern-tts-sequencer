@@ -72,6 +72,64 @@
   pointer-events: none;
 }
 
+#st-tts-sequencer-settings {
+  position: fixed;
+  z-index: 2147483647;
+  width: min(280px, calc(100vw - 16px));
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(24, 28, 27, 0.96);
+  color: #f6fff1;
+  font: 14px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
+  box-sizing: border-box;
+}
+
+#st-tts-sequencer-settings .st-tts-settings-title {
+  margin-bottom: 10px;
+  font-weight: 700;
+}
+
+#st-tts-sequencer-settings .st-tts-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+
+#st-tts-sequencer-settings .st-tts-settings-range-row {
+  display: grid;
+  grid-template-columns: auto 1fr 52px;
+}
+
+#st-tts-sequencer-settings input[type="range"] {
+  width: 100%;
+}
+
+#st-tts-sequencer-settings output {
+  text-align: right;
+  color: #d8efce;
+  font-variant-numeric: tabular-nums;
+}
+
+#st-tts-sequencer-settings .st-tts-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#st-tts-sequencer-settings button {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f6fff1;
+  font: inherit;
+}
+
 @media (pointer: coarse), (max-width: 768px) {
   #st-tts-sequencer-button {
     right: max(14px, env(safe-area-inset-right, 0px));
@@ -102,5 +160,12 @@
     bottom: calc(72px + env(safe-area-inset-bottom, 0px));
     max-width: none;
     text-align: center;
+  }
+
+  #st-tts-sequencer-settings {
+    left: 8px !important;
+    right: 8px;
+    width: auto;
+    max-width: none;
   }
 }

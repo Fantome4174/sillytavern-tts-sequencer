@@ -2,7 +2,10 @@
   const BUTTON_ID = "st-tts-sequencer-button";
   const TOAST_ID = "st-tts-sequencer-toast";
   const COUNT_BADGE_ID = "st-tts-sequencer-count";
+  const SETTINGS_PANEL_ID = "st-tts-sequencer-settings";
   const POSITION_KEY = "st-tts-sequencer-button-position";
+  const PAUSE_KEY = "st-tts-sequencer-dialogue-pause-ms";
+  const DEFAULT_FIXED_PAUSE_MS = 800;
   const CLICKABLE_SELECTOR = [
     "button",
     "a",
@@ -35,6 +38,7 @@
   let currentVoiceBubble = null;
   let playbackRunId = 0;
   let countRefreshTimer = null;
+  let longPressTimer = null;
 
   const isMobileViewport = () => {
     return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
@@ -559,6 +563,9 @@
   };
 
   const getDialoguePause = (previousItem, nextItem) => {
+    const configuredPause = getConfiguredDialoguePause();
+    if (configuredPause !== null) return configuredPause;
+
     const previousSeconds = previousItem?.seconds || 2;
     const nextSeconds = nextItem?.seconds || 2;
     const base = previousSeconds < 2.5 ? 420 : previousSeconds < 7 ? 650 : 900;
@@ -566,6 +573,21 @@
     const jitter = Math.round(Math.random() * 360);
 
     return Math.min(1800, base + anticipation + jitter);
+  };
+
+  const getConfiguredDialoguePause = () => {
+    const saved = Number(window.localStorage.getItem(PAUSE_KEY));
+    if (!Number.isFinite(saved) || saved < 0) return null;
+    return Math.min(10000, Math.max(0, saved));
+  };
+
+  const saveConfiguredDialoguePause = (milliseconds) => {
+    if (milliseconds === null) {
+      window.localStorage.setItem(PAUSE_KEY, "-1");
+      return;
+    }
+
+    window.localStorage.setItem(PAUSE_KEY, String(Math.min(10000, Math.max(0, Number(milliseconds) || 0))));
   };
 
   const waitBetweenDialogueLines = async (items, index) => {
@@ -669,6 +691,94 @@
     toast.textContent = message;
     document.body.appendChild(toast);
     window.setTimeout(() => toast.remove(), 2400);
+  };
+
+  const formatPauseSeconds = (milliseconds) => {
+    return `${(milliseconds / 1000).toFixed(1)} 秒`;
+  };
+
+  const closeSettingsPanel = () => {
+    document.getElementById(SETTINGS_PANEL_ID)?.remove();
+  };
+
+  const showSettingsPanel = (anchorEvent = null) => {
+    if (!document.body) return;
+
+    closeSettingsPanel();
+
+    const currentPause = getConfiguredDialoguePause();
+    const fixedPause = currentPause ?? DEFAULT_FIXED_PAUSE_MS;
+
+    const panel = document.createElement("div");
+    panel.id = SETTINGS_PANEL_ID;
+    panel.innerHTML = `
+      <div class="st-tts-settings-title">句间间隔</div>
+      <label class="st-tts-settings-row">
+        <input type="checkbox" data-role="auto">
+        <span>自动</span>
+      </label>
+      <label class="st-tts-settings-row st-tts-settings-range-row">
+        <span>固定</span>
+        <input type="range" min="0" max="5000" step="100" data-role="range">
+        <output data-role="value"></output>
+      </label>
+      <div class="st-tts-settings-actions">
+        <button type="button" data-role="reset">重置</button>
+        <button type="button" data-role="close">关闭</button>
+      </div>
+    `;
+
+    const autoInput = panel.querySelector("[data-role='auto']");
+    const rangeInput = panel.querySelector("[data-role='range']");
+    const valueOutput = panel.querySelector("[data-role='value']");
+
+    const syncControls = () => {
+      const isAuto = autoInput.checked;
+      rangeInput.disabled = isAuto;
+      valueOutput.textContent = isAuto ? "自动" : formatPauseSeconds(Number(rangeInput.value));
+    };
+
+    autoInput.checked = currentPause === null;
+    rangeInput.value = String(fixedPause);
+    syncControls();
+
+    autoInput.addEventListener("change", () => {
+      saveConfiguredDialoguePause(autoInput.checked ? null : Number(rangeInput.value));
+      syncControls();
+      showToast(autoInput.checked ? "句间间隔：自动" : `句间间隔：${formatPauseSeconds(Number(rangeInput.value))}`);
+    });
+
+    rangeInput.addEventListener("input", () => {
+      autoInput.checked = false;
+      saveConfiguredDialoguePause(Number(rangeInput.value));
+      syncControls();
+    });
+
+    rangeInput.addEventListener("change", () => {
+      showToast(`句间间隔：${formatPauseSeconds(Number(rangeInput.value))}`);
+    });
+
+    panel.querySelector("[data-role='reset']").addEventListener("click", () => {
+      autoInput.checked = true;
+      rangeInput.value = String(DEFAULT_FIXED_PAUSE_MS);
+      saveConfiguredDialoguePause(null);
+      syncControls();
+      showToast("句间间隔：自动");
+    });
+
+    panel.querySelector("[data-role='close']").addEventListener("click", closeSettingsPanel);
+
+    document.body.appendChild(panel);
+
+    const rect = floatingButton?.getBoundingClientRect();
+    const x = anchorEvent?.clientX ?? (rect ? rect.left : window.innerWidth - 280);
+    const y = anchorEvent?.clientY ?? (rect ? rect.top : window.innerHeight - 260);
+    const panelRect = panel.getBoundingClientRect();
+    const left = Math.min(Math.max(8, x), window.innerWidth - panelRect.width - 8);
+    const top = Math.min(Math.max(8, y), window.innerHeight - panelRect.height - 8);
+
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
   };
 
   const ensureButtonContent = () => {
@@ -916,6 +1026,13 @@
       };
 
       floatingButton.setPointerCapture?.(event.pointerId);
+
+      window.clearTimeout(longPressTimer);
+      longPressTimer = window.setTimeout(() => {
+        if (!dragState || dragState.pointerId !== event.pointerId || dragState.moved) return;
+        dragState.moved = true;
+        showSettingsPanel(event);
+      }, 650);
     });
 
     floatingButton.addEventListener("pointermove", (event) => {
@@ -923,13 +1040,17 @@
 
       const deltaX = event.clientX - dragState.startX;
       const deltaY = event.clientY - dragState.startY;
-      if (Math.abs(deltaX) + Math.abs(deltaY) > 4) dragState.moved = true;
+      if (Math.abs(deltaX) + Math.abs(deltaY) > 4) {
+        dragState.moved = true;
+        window.clearTimeout(longPressTimer);
+      }
 
       setButtonPosition(dragState.left + deltaX, dragState.top + deltaY);
     });
 
     floatingButton.addEventListener("pointerup", (event) => {
       if (!dragState || event.pointerId !== dragState.pointerId) return;
+      window.clearTimeout(longPressTimer);
       saveButtonPosition();
       window.setTimeout(() => {
         dragState = null;
@@ -937,6 +1058,7 @@
     });
 
     floatingButton.addEventListener("pointercancel", () => {
+      window.clearTimeout(longPressTimer);
       dragState = null;
     });
   };
@@ -984,6 +1106,12 @@
       if (dragState?.moved) return;
       triggerPlayback();
     }, true);
+
+    floatingButton.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showSettingsPanel(event);
+    });
 
     installDragHandlers();
     root.appendChild(floatingButton);
