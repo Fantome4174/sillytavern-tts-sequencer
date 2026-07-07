@@ -27,6 +27,7 @@
   let dragState = null;
   let lastTriggerAt = 0;
   let mediaUnlocked = false;
+  let buttonObserver = null;
 
   const isMobileViewport = () => {
     return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
@@ -443,6 +444,8 @@
   };
 
   const showToast = (message) => {
+    if (!document.body) return;
+
     const oldToast = document.getElementById(TOAST_ID);
     oldToast?.remove();
 
@@ -460,6 +463,41 @@
     floatingButton.classList.toggle("is-playing", isPlaying);
     floatingButton.title = isPlaying ? "暂停最新楼层 TTS 播放" : "播放最新楼层的所有 TTS 语音";
     floatingButton.setAttribute("aria-label", floatingButton.title);
+  };
+
+  const applyButtonFallbackStyles = () => {
+    if (!floatingButton) return;
+
+    const mobile = isMobileViewport();
+    const baseSize = mobile ? 52 : 44;
+    const bottom = mobile ? "calc(118px + env(safe-area-inset-bottom, 0px))" : "calc(92px + env(safe-area-inset-bottom, 0px))";
+    const right = mobile ? "max(14px, env(safe-area-inset-right, 0px))" : "18px";
+
+    Object.assign(floatingButton.style, {
+      position: "fixed",
+      width: `${baseSize}px`,
+      height: `${baseSize}px`,
+      borderRadius: "999px",
+      border: "1px solid rgba(255,255,255,.55)",
+      background: "rgba(173,238,149,.94)",
+      color: "#173018",
+      zIndex: "2147483647",
+      boxShadow: "0 8px 24px rgba(0,0,0,.28)",
+      font: `700 ${mobile ? 24 : 20}px/1 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      cursor: "grab",
+      padding: "0",
+      userSelect: "none",
+      touchAction: "none",
+      pointerEvents: "auto"
+    });
+
+    if (!floatingButton.style.left && !floatingButton.style.top) {
+      floatingButton.style.right = right;
+      floatingButton.style.bottom = bottom;
+    }
   };
 
   const stopPlayback = () => {
@@ -622,7 +660,19 @@
   };
 
   const createFloatingButton = () => {
-    if (floatingButton || document.getElementById(BUTTON_ID)) return;
+    const existingButton = document.getElementById(BUTTON_ID);
+    if (existingButton) {
+      floatingButton = existingButton;
+      applyButtonFallbackStyles();
+      return;
+    }
+    if (floatingButton) return;
+
+    const root = document.body || document.documentElement;
+    if (!root) {
+      window.setTimeout(createFloatingButton, 250);
+      return;
+    }
 
     floatingButton = document.createElement("button");
     floatingButton.id = BUTTON_ID;
@@ -631,6 +681,7 @@
     floatingButton.title = "播放最新楼层的所有 TTS 语音";
     floatingButton.setAttribute("aria-label", floatingButton.title);
     floatingButton.classList.toggle("is-mobile", isMobileViewport());
+    applyButtonFallbackStyles();
 
     const savedPosition = loadButtonPosition();
     if (savedPosition) setButtonPosition(savedPosition.left, savedPosition.top);
@@ -652,7 +703,7 @@
     }, true);
 
     installDragHandlers();
-    document.body.appendChild(floatingButton);
+    root.appendChild(floatingButton);
     window.setTimeout(() => showToast("TTS 顺序播放气泡已就绪"), 500);
   };
 
@@ -667,12 +718,18 @@
   };
 
   const boot = () => {
-    if (!getChatRoot()) {
-      window.setTimeout(boot, 500);
-      return;
-    }
-
     createFloatingButton();
+    window.setTimeout(clampButtonToViewport, 300);
+
+    if (!buttonObserver && document.documentElement) {
+      buttonObserver = new MutationObserver(() => {
+        if (!document.getElementById(BUTTON_ID)) {
+          floatingButton = null;
+          createFloatingButton();
+        }
+      });
+      buttonObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
   };
 
   window.STTtsSequencer = {
@@ -685,10 +742,15 @@
       floatingButton.style.top = "";
       floatingButton.style.right = "";
       floatingButton.style.bottom = "";
+      applyButtonFallbackStyles();
     }
   };
 
   window.addEventListener("resize", () => {
+    if (floatingButton) {
+      floatingButton.classList.toggle("is-mobile", isMobileViewport());
+      applyButtonFallbackStyles();
+    }
     window.setTimeout(clampButtonToViewport, 120);
   });
 
