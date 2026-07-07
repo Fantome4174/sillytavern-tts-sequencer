@@ -3,8 +3,10 @@
   const TOAST_ID = "st-tts-sequencer-toast";
   const COUNT_BADGE_ID = "st-tts-sequencer-count";
   const SETTINGS_PANEL_ID = "st-tts-sequencer-settings";
+  const MOBILE_AUDIO_ID = "st-tts-sequencer-mobile-audio";
   const POSITION_KEY = "st-tts-sequencer-button-position";
   const PAUSE_KEY = "st-tts-sequencer-dialogue-pause-ms";
+  const SILENCE_SRC = "/sounds/silence.mp3";
   const DEFAULT_FIXED_PAUSE_MS = 800;
   const CLICKABLE_SELECTOR = [
     "button",
@@ -39,6 +41,7 @@
   let playbackRunId = 0;
   let countRefreshTimer = null;
   let longPressTimer = null;
+  let mobileAudioPrimed = false;
 
   const isMobileViewport = () => {
     return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
@@ -80,6 +83,58 @@
 
   const hasPlayableSource = (audio) => {
     return Boolean(audio.currentSrc || audio.src || audio.querySelector("source[src]"));
+  };
+
+  const getMobileAudio = () => {
+    let audio = document.getElementById(MOBILE_AUDIO_ID);
+    if (!(audio instanceof HTMLAudioElement)) {
+      audio = document.createElement("audio");
+      audio.id = MOBILE_AUDIO_ID;
+      audio.preload = "auto";
+      audio.setAttribute("playsinline", "true");
+      audio.setAttribute("webkit-playsinline", "true");
+      audio.style.position = "fixed";
+      audio.style.left = "-1px";
+      audio.style.bottom = "-1px";
+      audio.style.width = "1px";
+      audio.style.height = "1px";
+      audio.style.opacity = "0.01";
+      audio.style.pointerEvents = "none";
+      (document.body || document.documentElement).appendChild(audio);
+    }
+
+    return audio;
+  };
+
+  const primeMobileAudio = () => {
+    if (!isMobileViewport()) return;
+
+    try {
+      const audio = getMobileAudio();
+      audio.setAttribute("playsinline", "true");
+      audio.setAttribute("webkit-playsinline", "true");
+      audio.muted = true;
+      audio.loop = true;
+      audio.volume = 0;
+
+      if (!audio.src || !audio.src.includes(SILENCE_SRC)) {
+        audio.src = SILENCE_SRC;
+        audio.load();
+      }
+
+      const playPromise = audio.play();
+      if (playPromise?.then) {
+        playPromise.then(() => {
+          mobileAudioPrimed = true;
+        }).catch(() => {
+          mobileAudioPrimed = false;
+        });
+      } else {
+        mobileAudioPrimed = true;
+      }
+    } catch {
+      mobileAudioPrimed = false;
+    }
   };
 
   const getVoiceBubbleKey = (bubble) => {
@@ -501,7 +556,6 @@
 
   const clickVoiceBubbleOnce = (bubble) => {
     const { x, y } = getElementCenter(bubble);
-    const pointerType = isMobileViewport() ? "touch" : "mouse";
     const eventOptions = {
       bubbles: true,
       cancelable: true,
@@ -511,21 +565,8 @@
       button: 0,
       buttons: 0
     };
-    const createPointerEvent = (type, options) => {
-      if (typeof PointerEvent === "undefined") {
-        return new MouseEvent(type.replace("pointer", "mouse"), options);
-      }
-
-      return new PointerEvent(type, options);
-    };
 
     bubble.focus?.({ preventScroll: true });
-    if (isMobileViewport()) dispatchTouchEvent(bubble, "touchstart", x, y);
-    bubble.dispatchEvent(createPointerEvent("pointerdown", { ...eventOptions, buttons: 1, pointerId: 1, pointerType, isPrimary: true }));
-    bubble.dispatchEvent(new MouseEvent("mousedown", { ...eventOptions, buttons: 1 }));
-    bubble.dispatchEvent(createPointerEvent("pointerup", { ...eventOptions, pointerId: 1, pointerType, isPrimary: true }));
-    bubble.dispatchEvent(new MouseEvent("mouseup", eventOptions));
-    if (isMobileViewport()) dispatchTouchEvent(bubble, "touchend", x, y);
     bubble.dispatchEvent(new MouseEvent("click", eventOptions));
   };
 
@@ -538,7 +579,49 @@
     return true;
   };
 
-  const playVoiceBubbleByMobileClick = async (bubble, runId) => {
+  const playWithMobileAudio = async (bubble, audioUrl) => {
+    const audio = getMobileAudio();
+
+    stopNativeVoiceBubblePlayback();
+    currentAudio = audio;
+    bubble.classList.add("playing");
+
+    try {
+      audio.pause();
+      audio.loop = false;
+      audio.muted = false;
+      audio.volume = 1;
+      audio.src = audioUrl;
+      audio.currentTime = 0;
+      audio.load();
+
+      await audio.play();
+      mobileAudioPrimed = true;
+      await waitForAudioToEnd(audio);
+    } finally {
+      if (stopRequested) {
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+      } else {
+        try {
+          audio.muted = true;
+          audio.loop = true;
+          audio.volume = 0;
+          audio.src = SILENCE_SRC;
+          audio.load();
+          await audio.play();
+          mobileAudioPrimed = true;
+        } catch {
+          mobileAudioPrimed = false;
+        }
+      }
+      bubble.classList.remove("playing");
+      if (currentAudio === audio) currentAudio = null;
+    }
+  };
+
+  const playVoiceBubbleOnMobile = async (bubble, runId) => {
     let liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(bubble)) || bubble;
     currentVoiceBubble = liveBubble;
 
@@ -549,12 +632,12 @@
 
     let audioUrl = getVoiceBubbleAudioUrl(liveBubble);
     if (!audioUrl) {
-      clickVoiceBubbleOnce(liveBubble);
+      await queueVoiceBubbleGeneration(liveBubble);
 
-      const startedImmediately = await waitForVoiceBubblePlaybackStart(liveBubble, 700);
-      if (startedImmediately) {
-        await waitForVoiceBubblePlaybackEnd(liveBubble);
-        return;
+      const startedUnexpectedly = await waitForVoiceBubblePlaybackStart(liveBubble, 450);
+      if (startedUnexpectedly) {
+        clickVoiceBubbleOnce(liveBubble);
+        await wait(120);
       }
 
       audioUrl = await waitForVoiceBubbleAudioUrl(liveBubble, runId);
@@ -567,23 +650,7 @@
 
     if (stopRequested || runId !== playbackRunId) return;
 
-    if (!liveBubble.classList.contains("playing")) {
-      stopNativeVoiceBubblePlayback();
-      await wait(80);
-      clickVoiceBubbleOnce(liveBubble);
-    }
-
-    let started = await waitForVoiceBubblePlaybackStart(liveBubble, 2600);
-    if (!started && !stopRequested && runId === playbackRunId) {
-      clickVoiceBubbleOnce(liveBubble);
-      started = await waitForVoiceBubblePlaybackStart(liveBubble, 1600);
-    }
-
-    if (!started) {
-      throw new Error("Voice bubble click did not start playback");
-    }
-
-    await waitForVoiceBubblePlaybackEnd(liveBubble);
+    await playWithMobileAudio(liveBubble, audioUrl);
   };
 
   const playVoiceBubble = async (bubble, runId) => {
@@ -592,7 +659,7 @@
 
     if (isMobileViewport()) {
       try {
-        await playVoiceBubbleByMobileClick(liveBubble, runId);
+        await playVoiceBubbleOnMobile(liveBubble, runId);
       } finally {
         liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(liveBubble)) || liveBubble;
         liveBubble.classList.remove("playing");
@@ -952,6 +1019,15 @@
       currentVoiceBubble.classList.remove("playing");
       currentVoiceBubble = null;
     }
+    if (isMobileViewport()) {
+      const audio = document.getElementById(MOBILE_AUDIO_ID);
+      if (audio instanceof HTMLAudioElement) {
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+      }
+      mobileAudioPrimed = false;
+    }
     stopNativeVoiceBubblePlayback();
     if (currentVoiceButton) {
       void clickElement(currentVoiceButton);
@@ -1044,6 +1120,7 @@
       return;
     }
 
+    primeMobileAudio();
     void unlockMediaPlayback();
     void playLatestMessageAudios();
   };
@@ -1165,10 +1242,12 @@
     if (savedPosition) setButtonPosition(savedPosition.left, savedPosition.top);
 
     floatingButton.addEventListener("pointerdown", () => {
+      primeMobileAudio();
       void unlockMediaPlayback();
     }, true);
 
     floatingButton.addEventListener("touchstart", () => {
+      primeMobileAudio();
       void unlockMediaPlayback();
     }, { passive: true, capture: true });
 
@@ -1223,15 +1302,24 @@
     playLatest: playLatestMessageAudios,
     mobilePlaybackState: () => ({
       isMobile: isMobileViewport(),
-      strategy: "voice-bubble-click",
+      strategy: "single-mobile-audio",
+      primed: mobileAudioPrimed,
       currentBubbleKey: getVoiceBubbleKey(currentVoiceBubble)
     }),
-    mobileAudioState: () => ({
-      isMobile: isMobileViewport(),
-      strategy: "voice-bubble-click",
-      hiddenAudio: false,
-      currentBubbleKey: getVoiceBubbleKey(currentVoiceBubble)
-    }),
+    mobileAudioState: () => {
+      const audio = document.getElementById(MOBILE_AUDIO_ID);
+      return {
+        isMobile: isMobileViewport(),
+        strategy: "single-mobile-audio",
+        primed: mobileAudioPrimed,
+        exists: audio instanceof HTMLAudioElement,
+        paused: audio instanceof HTMLAudioElement ? audio.paused : null,
+        muted: audio instanceof HTMLAudioElement ? audio.muted : null,
+        src: audio instanceof HTMLAudioElement ? audio.currentSrc || audio.src : "",
+        readyState: audio instanceof HTMLAudioElement ? audio.readyState : null,
+        currentBubbleKey: getVoiceBubbleKey(currentVoiceBubble)
+      };
+    },
     resetButtonPosition: () => {
       window.localStorage.removeItem(getPositionKey());
       if (!floatingButton) return;
