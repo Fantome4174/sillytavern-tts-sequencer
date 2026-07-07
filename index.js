@@ -3,10 +3,8 @@
   const TOAST_ID = "st-tts-sequencer-toast";
   const COUNT_BADGE_ID = "st-tts-sequencer-count";
   const SETTINGS_PANEL_ID = "st-tts-sequencer-settings";
-  const MOBILE_AUDIO_ID = "st-tts-sequencer-mobile-audio";
   const POSITION_KEY = "st-tts-sequencer-button-position";
   const PAUSE_KEY = "st-tts-sequencer-dialogue-pause-ms";
-  const SILENCE_SRC = "/sounds/silence.mp3";
   const DEFAULT_FIXED_PAUSE_MS = 800;
   const CLICKABLE_SELECTOR = [
     "button",
@@ -41,18 +39,9 @@
   let playbackRunId = 0;
   let countRefreshTimer = null;
   let longPressTimer = null;
-  let mobileAudioPrimed = false;
-  let mobileAudioContext = null;
-  let currentMobileSource = null;
 
   const isMobileViewport = () => {
-    const userAgent = navigator.userAgent || "";
-    return (
-      window.matchMedia?.("(pointer: coarse)").matches ||
-      window.innerWidth <= 900 ||
-      navigator.maxTouchPoints > 0 ||
-      /Android|iPhone|iPad|iPod|Mobile|Silk|Kindle/i.test(userAgent)
-    );
+    return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
   };
 
   const collectElements = (selector, root = document) => {
@@ -91,91 +80,6 @@
 
   const hasPlayableSource = (audio) => {
     return Boolean(audio.currentSrc || audio.src || audio.querySelector("source[src]"));
-  };
-
-  const getMobileAudio = () => {
-    let audio = document.getElementById(MOBILE_AUDIO_ID);
-    if (!(audio instanceof HTMLAudioElement)) {
-      audio = document.createElement("audio");
-      audio.id = MOBILE_AUDIO_ID;
-      audio.preload = "auto";
-      audio.setAttribute("playsinline", "true");
-      audio.setAttribute("webkit-playsinline", "true");
-      audio.style.position = "fixed";
-      audio.style.left = "-1px";
-      audio.style.bottom = "-1px";
-      audio.style.width = "1px";
-      audio.style.height = "1px";
-      audio.style.opacity = "0.01";
-      audio.style.pointerEvents = "none";
-      (document.body || document.documentElement).appendChild(audio);
-    }
-
-    return audio;
-  };
-
-  const getMobileAudioContext = () => {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return null;
-
-    if (!mobileAudioContext || mobileAudioContext.state === "closed") {
-      mobileAudioContext = new AudioContextClass();
-    }
-
-    return mobileAudioContext;
-  };
-
-  const primeMobileAudio = () => {
-    if (!isMobileViewport()) return;
-
-    try {
-      const audio = getMobileAudio();
-      audio.setAttribute("playsinline", "true");
-      audio.setAttribute("webkit-playsinline", "true");
-      audio.muted = true;
-      audio.loop = true;
-      audio.volume = 0;
-
-      if (!audio.src || !audio.src.includes(SILENCE_SRC)) {
-        audio.src = SILENCE_SRC;
-        audio.load();
-      }
-
-      const playPromise = audio.play();
-      if (playPromise?.then) {
-        playPromise.then(() => {
-          mobileAudioPrimed = true;
-        }).catch(() => {
-          mobileAudioPrimed = false;
-        });
-      } else {
-        mobileAudioPrimed = true;
-      }
-    } catch {
-      mobileAudioPrimed = false;
-    }
-
-    try {
-      const context = getMobileAudioContext();
-      if (!context) return;
-
-      const resumePromise = context.state === "suspended" ? context.resume() : Promise.resolve();
-      resumePromise.then(() => {
-        const source = context.createBufferSource();
-        const gain = context.createGain();
-        gain.gain.value = 0;
-        source.buffer = context.createBuffer(1, 1, context.sampleRate);
-        source.connect(gain);
-        gain.connect(context.destination);
-        source.start(0);
-        source.stop(context.currentTime + 0.01);
-        mobileAudioPrimed = true;
-      }).catch(() => {
-        if (!mobileAudioPrimed) mobileAudioPrimed = false;
-      });
-    } catch {
-      if (!mobileAudioPrimed) mobileAudioPrimed = false;
-    }
   };
 
   const getVoiceBubbleKey = (bubble) => {
@@ -620,165 +524,9 @@
     return true;
   };
 
-  const stopMobileWebAudio = () => {
-    if (!currentMobileSource) return;
-
-    try {
-      currentMobileSource.stop(0);
-    } catch {
-      // The source may already be stopped.
-    }
-    currentMobileSource = null;
-  };
-
-  const decodeAudioBuffer = (context, arrayBuffer) => {
-    try {
-      const decodeResult = context.decodeAudioData(arrayBuffer.slice(0));
-      if (decodeResult?.then) return decodeResult;
-    } catch {
-      // Older mobile browsers require the callback form below.
-    }
-
-    return new Promise((resolve, reject) => {
-      context.decodeAudioData(arrayBuffer.slice(0), resolve, reject);
-    });
-  };
-
-  const playWithMobileWebAudio = async (audioUrl) => {
-    const context = getMobileAudioContext();
-    if (!context) throw new Error("Mobile WebAudio is not available");
-    if (context.state === "suspended") await context.resume();
-
-    const resolvedAudioUrl = new URL(audioUrl, window.location.href).href;
-    const fetchOptions = /^https?:/i.test(resolvedAudioUrl)
-      ? { credentials: "include", cache: "no-store" }
-      : {};
-    const response = await fetch(resolvedAudioUrl, fetchOptions);
-    if (!response.ok) throw new Error(`Audio fetch failed: ${response.status}`);
-
-    const audioBuffer = await decodeAudioBuffer(context, await response.arrayBuffer());
-    if (stopRequested) return;
-
-    stopMobileWebAudio();
-
-    await new Promise((resolve, reject) => {
-      try {
-        const source = context.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(context.destination);
-        currentMobileSource = source;
-        source.onended = () => {
-          if (currentMobileSource === source) currentMobileSource = null;
-          resolve();
-        };
-        source.start(0);
-      } catch (error) {
-        reject(error);
-      }
-    });
-  };
-
-  const playWithMobileHtmlAudio = async (audioUrl) => {
-    const audio = getMobileAudio();
-
-    currentAudio = audio;
-
-    try {
-      audio.pause();
-      audio.loop = false;
-      audio.muted = false;
-      audio.volume = 1;
-      audio.src = audioUrl;
-      audio.currentTime = 0;
-      audio.load();
-
-      await audio.play();
-      mobileAudioPrimed = true;
-      await waitForAudioToEnd(audio);
-    } finally {
-      if (stopRequested) {
-        audio.pause();
-        audio.removeAttribute("src");
-        audio.load();
-      } else {
-        try {
-          audio.muted = true;
-          audio.loop = true;
-          audio.volume = 0;
-          audio.src = SILENCE_SRC;
-          audio.load();
-          await audio.play();
-          mobileAudioPrimed = true;
-        } catch {
-          mobileAudioPrimed = false;
-        }
-      }
-      if (currentAudio === audio) currentAudio = null;
-    }
-  };
-
-  const playWithMobileAudio = async (bubble, audioUrl) => {
-    stopNativeVoiceBubblePlayback();
-    stopMobileWebAudio();
-    bubble.classList.add("playing");
-
-    try {
-      await playWithMobileWebAudio(audioUrl);
-      mobileAudioPrimed = true;
-    } catch (error) {
-      console.warn("[SillyTavern TTS Sequencer] WebAudio mobile playback failed, falling back to HTMLAudio:", error);
-      await playWithMobileHtmlAudio(audioUrl);
-    } finally {
-      bubble.classList.remove("playing");
-    }
-  };
-
-  const playVoiceBubbleOnMobile = async (bubble, runId) => {
-    let liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(bubble)) || bubble;
-    currentVoiceBubble = liveBubble;
-
-    if (liveBubble.classList.contains("playing")) {
-      clickVoiceBubbleOnce(liveBubble);
-      await wait(160);
-    }
-
-    let audioUrl = getVoiceBubbleAudioUrl(liveBubble);
-    if (!audioUrl) {
-      await queueVoiceBubbleGeneration(liveBubble);
-
-      const startedUnexpectedly = await waitForVoiceBubblePlaybackStart(liveBubble, 450);
-      if (startedUnexpectedly) {
-        clickVoiceBubbleOnce(liveBubble);
-        await wait(120);
-      }
-
-      audioUrl = await waitForVoiceBubbleAudioUrl(liveBubble, runId);
-      if (!audioUrl) throw new Error("Voice bubble audio URL was not generated");
-
-      liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(liveBubble)) || liveBubble;
-      currentVoiceBubble = liveBubble;
-      await wait(160);
-    }
-
-    if (stopRequested || runId !== playbackRunId) return;
-
-    await playWithMobileAudio(liveBubble, audioUrl);
-  };
-
   const playVoiceBubble = async (bubble, runId) => {
     let liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(bubble)) || bubble;
     currentVoiceBubble = liveBubble;
-
-    if (isMobileViewport()) {
-      try {
-        await playVoiceBubbleOnMobile(liveBubble, runId);
-      } finally {
-        liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(liveBubble)) || liveBubble;
-        liveBubble.classList.remove("playing");
-        currentVoiceBubble = null;
-      }
-      return;
-    }
 
     let audioUrl = getVoiceBubbleAudioUrl(liveBubble);
     if (!audioUrl) {
@@ -1127,19 +875,9 @@
       currentAudio.pause();
       currentAudio = null;
     }
-    stopMobileWebAudio();
     if (currentVoiceBubble) {
       currentVoiceBubble.classList.remove("playing");
       currentVoiceBubble = null;
-    }
-    if (isMobileViewport()) {
-      const audio = document.getElementById(MOBILE_AUDIO_ID);
-      if (audio instanceof HTMLAudioElement) {
-        audio.pause();
-        audio.removeAttribute("src");
-        audio.load();
-      }
-      mobileAudioPrimed = false;
     }
     stopNativeVoiceBubblePlayback();
     if (currentVoiceButton) {
@@ -1233,7 +971,6 @@
       return;
     }
 
-    primeMobileAudio();
     void unlockMediaPlayback();
     void playLatestMessageAudios();
   };
@@ -1355,12 +1092,10 @@
     if (savedPosition) setButtonPosition(savedPosition.left, savedPosition.top);
 
     floatingButton.addEventListener("pointerdown", () => {
-      primeMobileAudio();
       void unlockMediaPlayback();
     }, true);
 
     floatingButton.addEventListener("touchstart", () => {
-      primeMobileAudio();
       void unlockMediaPlayback();
     }, { passive: true, capture: true });
 
@@ -1413,40 +1148,9 @@
   window.STTtsSequencer = {
     scanLatest: getLatestMessageSequence,
     playLatest: playLatestMessageAudios,
-    mobilePlaybackState: () => ({
-      isMobile: isMobileViewport(),
-      strategy: "mobile-webaudio-first",
-      primed: mobileAudioPrimed,
-      audioContextState: mobileAudioContext?.state || null,
-      hasActiveWebAudioSource: Boolean(currentMobileSource),
-      currentBubbleKey: getVoiceBubbleKey(currentVoiceBubble)
-    }),
-    mobileAudioState: () => {
-      const audio = document.getElementById(MOBILE_AUDIO_ID);
-      return {
-        isMobile: isMobileViewport(),
-        strategy: "mobile-webaudio-first",
-        primed: mobileAudioPrimed,
-        audioContextState: mobileAudioContext?.state || null,
-        hasActiveWebAudioSource: Boolean(currentMobileSource),
-        exists: audio instanceof HTMLAudioElement,
-        paused: audio instanceof HTMLAudioElement ? audio.paused : null,
-        muted: audio instanceof HTMLAudioElement ? audio.muted : null,
-        src: audio instanceof HTMLAudioElement ? audio.currentSrc || audio.src : "",
-        readyState: audio instanceof HTMLAudioElement ? audio.readyState : null,
-        currentBubbleKey: getVoiceBubbleKey(currentVoiceBubble)
-      };
-    },
     diagnose: () => ({
       isMobile: isMobileViewport(),
-      viewport: {
-        width: window.innerWidth,
-        height: window.innerHeight,
-        maxTouchPoints: navigator.maxTouchPoints || 0,
-        coarsePointer: Boolean(window.matchMedia?.("(pointer: coarse)").matches)
-      },
       latestTtsCount: getLatestMessageTtsCount(),
-      mobile: window.STTtsSequencer.mobileAudioState(),
       latest: getLatestMessageSequence()
     }),
     resetButtonPosition: () => {
