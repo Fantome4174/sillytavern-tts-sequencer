@@ -22,6 +22,32 @@
   transition: transform 120ms ease, filter 120ms ease;
 }
 
+#st-tts-sequencer-button .st-tts-sequencer-icon {
+  display: block;
+  line-height: 1;
+}
+
+#st-tts-sequencer-count {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  background: rgba(34, 45, 35, 0.96);
+  color: #fff;
+  font: 700 11px/17px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: center;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+#st-tts-sequencer-count[hidden] {
+  display: none;
+}
+
 #st-tts-sequencer-button:hover {
   transform: scale(1.06);
   filter: brightness(1.03);
@@ -54,6 +80,15 @@
     height: 52px;
     font-size: 24px;
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.34);
+  }
+
+  #st-tts-sequencer-count {
+    top: -6px;
+    right: -6px;
+    min-width: 20px;
+    height: 20px;
+    font-size: 12px;
+    line-height: 19px;
   }
 
   #st-tts-sequencer-button:hover {

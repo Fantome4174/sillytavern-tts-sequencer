@@ -2,6 +2,7 @@
   const BUTTON_ID = "st-tts-sequencer-button";
   const TOAST_ID = "st-tts-sequencer-toast";
   const PLAYER_ID = "st-tts-sequencer-audio";
+  const COUNT_BADGE_ID = "st-tts-sequencer-count";
   const POSITION_KEY = "st-tts-sequencer-button-position";
   const SILENCE_SRC = "/sounds/silence.mp3";
   const CLICKABLE_SELECTOR = [
@@ -37,6 +38,7 @@
   let currentVoiceBubble = null;
   let playbackRunId = 0;
   let unlockPromise = null;
+  let countRefreshTimer = null;
 
   const isMobileViewport = () => {
     return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
@@ -323,6 +325,11 @@
     return { message: latestMessage, items: [], usedFallback: false };
   };
 
+  const getLatestMessageTtsCount = () => {
+    const latestMessage = getLatestMessage();
+    return latestMessage ? collectSequenceItemsFromMessage(latestMessage).length : 0;
+  };
+
   const wait = async (milliseconds) => {
     const endAt = Date.now() + milliseconds;
 
@@ -356,6 +363,45 @@
       audio.addEventListener("pause", onPause);
       audio.addEventListener("error", onDone, { once: true });
       audio.addEventListener("stalled", onDone, { once: true });
+    });
+  };
+
+  const waitForAudioToStart = (audio, timeout = 2600) => {
+    return new Promise((resolve, reject) => {
+      if (!audio.paused && !audio.ended && audio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        resolve();
+        return;
+      }
+
+      const timer = window.setTimeout(() => {
+        cleanup();
+        reject(new Error("Audio did not start"));
+      }, timeout);
+
+      const cleanup = () => {
+        window.clearTimeout(timer);
+        audio.removeEventListener("playing", onStart);
+        audio.removeEventListener("timeupdate", onStart);
+        audio.removeEventListener("canplay", onStart);
+        audio.removeEventListener("error", onError);
+      };
+
+      const onStart = () => {
+        if (!audio.paused || audio.currentTime > 0) {
+          cleanup();
+          resolve();
+        }
+      };
+
+      const onError = () => {
+        cleanup();
+        reject(audio.error || new Error("Audio playback failed"));
+      };
+
+      audio.addEventListener("playing", onStart);
+      audio.addEventListener("timeupdate", onStart);
+      audio.addEventListener("canplay", onStart);
+      audio.addEventListener("error", onError, { once: true });
     });
   };
 
@@ -471,21 +517,49 @@
   };
 
   const playAudioUrl = async (url) => {
-    const audio = getSequencerAudio();
+    const audio = document.createElement("audio");
+    audio.preload = "auto";
+    audio.setAttribute("playsinline", "true");
+    audio.style.position = "fixed";
+    audio.style.left = "-2px";
+    audio.style.bottom = "-2px";
+    audio.style.width = "1px";
+    audio.style.height = "1px";
+    audio.style.opacity = "0.01";
+    audio.style.pointerEvents = "none";
+    (document.body || document.documentElement).appendChild(audio);
 
     currentAudio = audio;
-    audio.pause();
     audio.loop = false;
     audio.src = url;
     audio.currentTime = 0;
     audio.volume = 1;
     audio.muted = false;
-    await audio.play().catch((error) => {
-      showToast("手机浏览器拦截了自动播放，请再点一次气泡");
+
+    try {
+      audio.load();
+      await audio.play();
+      await waitForAudioToStart(audio);
+      await waitForAudioToEnd(audio);
+    } catch (error) {
+      showToast("未能直接播放音频，正在尝试备用播放");
       throw error;
-    });
-    await waitForAudioToEnd(audio);
-    currentAudio = null;
+    } finally {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      audio.remove();
+      if (currentAudio === audio) currentAudio = null;
+    }
+  };
+
+  const playWithNativeTtsPlugin = async (bubble, audioUrl) => {
+    const key = getVoiceBubbleKey(bubble);
+    if (!key || typeof window.TTS_Events?.playAudio !== "function") return false;
+
+    window.TTS_Events.playAudio(key, audioUrl);
+    await wait(Math.max(900, (parseDurationSeconds(getElementText(bubble)) || 2) * 1000 + 260));
+    return true;
   };
 
   const playVoiceBubble = async (bubble, runId) => {
@@ -497,9 +571,17 @@
     if (!audioUrl) throw new Error("Voice bubble audio URL was not generated");
 
     const liveBubble = findVoiceBubbleByKey(getVoiceBubbleKey(bubble)) || bubble;
-    liveBubble.classList.add("playing");
+
     try {
+      liveBubble.classList.add("playing");
       await playAudioUrl(audioUrl);
+    } catch (error) {
+      console.warn("[SillyTavern TTS Sequencer] Primary audio playback failed:", error);
+      const handled = await playWithNativeTtsPlugin(liveBubble, audioUrl);
+      if (!handled) {
+        await clickElement(liveBubble);
+        await waitForAnyActiveAudio(parseDurationSeconds(getElementText(liveBubble)));
+      }
     } finally {
       liveBubble.classList.remove("playing");
       currentVoiceBubble = null;
@@ -638,13 +720,54 @@
     window.setTimeout(() => toast.remove(), 2400);
   };
 
+  const ensureButtonContent = () => {
+    if (!floatingButton) return {};
+
+    let icon = floatingButton.querySelector(".st-tts-sequencer-icon");
+    if (!icon) {
+      floatingButton.textContent = "";
+      icon = document.createElement("span");
+      icon.className = "st-tts-sequencer-icon";
+      floatingButton.appendChild(icon);
+    }
+
+    let badge = floatingButton.querySelector(`#${COUNT_BADGE_ID}`);
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.id = COUNT_BADGE_ID;
+      floatingButton.appendChild(badge);
+    }
+
+    return { icon, badge };
+  };
+
+  const updateButtonCount = () => {
+    if (!floatingButton) return;
+
+    const { badge } = ensureButtonContent();
+    if (!badge) return;
+
+    const count = getLatestMessageTtsCount();
+    badge.textContent = String(count);
+    badge.hidden = !isMobileViewport();
+    badge.title = `当前楼层识别到 ${count} 段 TTS`;
+    floatingButton.dataset.ttsCount = String(count);
+  };
+
+  const scheduleButtonCountUpdate = () => {
+    window.clearTimeout(countRefreshTimer);
+    countRefreshTimer = window.setTimeout(updateButtonCount, 180);
+  };
+
   const updateFloatingButton = (isPlaying) => {
     if (!floatingButton) return;
 
-    floatingButton.textContent = isPlaying ? "II" : ">";
+    const { icon } = ensureButtonContent();
+    if (icon) icon.textContent = isPlaying ? "II" : ">";
     floatingButton.classList.toggle("is-playing", isPlaying);
     floatingButton.title = isPlaying ? "暂停最新楼层 TTS 播放" : "播放最新楼层的所有 TTS 语音";
     floatingButton.setAttribute("aria-label", floatingButton.title);
+    updateButtonCount();
   };
 
   const applyButtonFallbackStyles = () => {
@@ -883,10 +1006,11 @@
     floatingButton = document.createElement("button");
     floatingButton.id = BUTTON_ID;
     floatingButton.type = "button";
-    floatingButton.textContent = ">";
     floatingButton.title = "播放最新楼层的所有 TTS 语音";
     floatingButton.setAttribute("aria-label", floatingButton.title);
     floatingButton.classList.toggle("is-mobile", isMobileViewport());
+    ensureButtonContent();
+    updateFloatingButton(false);
     applyButtonFallbackStyles();
 
     const savedPosition = loadButtonPosition();
@@ -910,6 +1034,7 @@
 
     installDragHandlers();
     root.appendChild(floatingButton);
+    updateButtonCount();
     window.setTimeout(() => showToast("TTS 顺序播放气泡已就绪"), 500);
   };
 
@@ -933,6 +1058,7 @@
           floatingButton = null;
           createFloatingButton();
         }
+        scheduleButtonCountUpdate();
       });
       buttonObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
