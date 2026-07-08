@@ -41,7 +41,13 @@
   let longPressTimer = null;
 
   const isMobileViewport = () => {
-    return window.matchMedia?.("(pointer: coarse)").matches || window.innerWidth <= 768;
+    const userAgent = navigator.userAgent || "";
+    return (
+      window.matchMedia?.("(pointer: coarse)").matches ||
+      navigator.maxTouchPoints > 0 ||
+      window.innerWidth <= 900 ||
+      /Android|iPhone|iPad|iPod|Mobile|Silk|Kindle/i.test(userAgent)
+    );
   };
 
   const collectElements = (selector, root = document) => {
@@ -372,6 +378,18 @@
     await wait(Math.max(900, (fallbackSeconds || 2) * 1000 + 180));
   };
 
+  const stopActiveMediaElements = () => {
+    collectElements("audio,video", document)
+      .filter((media) => !media.paused && !media.ended)
+      .forEach((media) => {
+        try {
+          media.pause();
+        } catch {
+          // Some custom media wrappers can throw; continue stopping the rest.
+        }
+      });
+  };
+
   const getVoiceBubbleDuration = (bubble) => {
     return parseDurationSeconds(getElementText(bubble)) || 2;
   };
@@ -648,7 +666,6 @@
 
   const clickElement = async (element) => {
     const { x, y } = getElementCenter(element);
-    const pointerType = isMobileViewport() ? "touch" : "mouse";
     const eventOptions = {
       bubbles: true,
       cancelable: true,
@@ -656,28 +673,17 @@
       clientX: x,
       clientY: y,
       button: 0,
-      buttons: 1
-    };
-
-    const createPointerEvent = (type, options) => {
-      if (typeof PointerEvent === "undefined") {
-        return new MouseEvent(type.replace("pointer", "mouse"), options);
-      }
-
-      return new PointerEvent(type, options);
+      buttons: 0
     };
 
     element.focus?.({ preventScroll: true });
-    dispatchTouchEvent(element, "touchstart", x, y);
-    element.dispatchEvent(createPointerEvent("pointerover", { ...eventOptions, pointerId: 1, pointerType, isPrimary: true }));
-    element.dispatchEvent(new MouseEvent("mouseover", eventOptions));
-    element.dispatchEvent(createPointerEvent("pointerdown", { ...eventOptions, pointerId: 1, pointerType, isPrimary: true }));
-    element.dispatchEvent(new MouseEvent("mousedown", eventOptions));
-    element.dispatchEvent(createPointerEvent("pointerup", { ...eventOptions, buttons: 0, pointerId: 1, pointerType, isPrimary: true }));
-    element.dispatchEvent(new MouseEvent("mouseup", { ...eventOptions, buttons: 0 }));
-    dispatchTouchEvent(element, "touchend", x, y);
-    element.dispatchEvent(new MouseEvent("click", { ...eventOptions, buttons: 0 }));
-    element.click?.();
+    element.dispatchEvent(new MouseEvent("click", eventOptions));
+  };
+
+  const consumeFloatingEvent = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
   };
 
   const showToast = (message) => {
@@ -879,10 +885,8 @@
       currentVoiceBubble.classList.remove("playing");
       currentVoiceBubble = null;
     }
+    stopActiveMediaElements();
     stopNativeVoiceBubblePlayback();
-    if (currentVoiceButton) {
-      void clickElement(currentVoiceButton);
-    }
     currentVoiceButton = null;
     updateFloatingButton(false);
     showToast("已暂停顺序播放");
@@ -1091,7 +1095,13 @@
     const savedPosition = loadButtonPosition();
     if (savedPosition) setButtonPosition(savedPosition.left, savedPosition.top);
 
-    floatingButton.addEventListener("pointerdown", () => {
+    floatingButton.addEventListener("pointerdown", (event) => {
+      if (event.button === 2) {
+        consumeFloatingEvent(event);
+        showSettingsPanel(event);
+        return;
+      }
+
       void unlockMediaPlayback();
     }, true);
 
@@ -1100,18 +1110,21 @@
     }, { passive: true, capture: true });
 
     floatingButton.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+      consumeFloatingEvent(event);
 
       if (dragState?.moved) return;
       triggerPlayback();
     }, true);
 
     floatingButton.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+      consumeFloatingEvent(event);
       showSettingsPanel(event);
-    });
+    }, true);
+
+    floatingButton.addEventListener("auxclick", consumeFloatingEvent, true);
+    floatingButton.addEventListener("mouseup", (event) => {
+      if (event.button === 2) consumeFloatingEvent(event);
+    }, true);
 
     installDragHandlers();
     root.appendChild(floatingButton);
